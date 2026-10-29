@@ -41,6 +41,7 @@ class MainActivity : ComponentActivity() {
                         onStop = vm::cancelGeneration,
                         onNewChat = vm::newChat,
                         onOpenSetup = { showSetup = true },
+                        onDeepChange = vm::setDeep,
                     )
                 }
             }

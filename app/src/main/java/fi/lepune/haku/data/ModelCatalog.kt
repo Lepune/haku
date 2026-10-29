@@ -12,7 +12,7 @@ data class ModelSpec(
     /** Precompiled for one NPU only; never try GPU/CPU with it. */
     val npuOnly: Boolean = false,
     /** Context window to allocate. null = model default. */
-    val maxTokens: Int? = 8192,
+    val maxTokens: Int? = 12288,
 ) {
     val url: String get() = "https://huggingface.co/$repo/resolve/main/$fileName?download=true"
 }

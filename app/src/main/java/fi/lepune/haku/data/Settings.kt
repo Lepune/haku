@@ -12,7 +12,10 @@ enum class BackendPref(val label: String) {
 data class Settings(
     val modelId: String = ModelCatalog.DEFAULT.id,
     val backend: BackendPref = BackendPref.GPU,
-    val speculativeDecoding: Boolean = true,
+    /** Multi-token prediction. Off by default: suspected cause of duplicated tokens (garbled numbers/words). */
+    val speculativeDecoding: Boolean = false,
+    /** App-driven research: plan queries, read many pages, answer from extracted evidence. */
+    val deepSearch: Boolean = false,
     val searxngUrl: String = "",
     val hfToken: String = "",
     val searchRegion: String = "fi-fi",
@@ -26,7 +29,8 @@ class SettingsStore(context: Context) {
             ?: ModelCatalog.DEFAULT.id,
         backend = runCatching { BackendPref.valueOf(prefs.getString("backend", "GPU")!!) }
             .getOrDefault(BackendPref.GPU),
-        speculativeDecoding = prefs.getBoolean("speculative", true),
+        speculativeDecoding = prefs.getBoolean("speculative_v2", false),
+        deepSearch = prefs.getBoolean("deepSearch", false),
         searxngUrl = prefs.getString("searxngUrl", "") ?: "",
         hfToken = prefs.getString("hfToken", "") ?: "",
         searchRegion = prefs.getString("searchRegion", "fi-fi") ?: "fi-fi",
@@ -35,7 +39,8 @@ class SettingsStore(context: Context) {
     fun save(s: Settings) = prefs.edit {
         putString("modelId", s.modelId)
         putString("backend", s.backend.name)
-        putBoolean("speculative", s.speculativeDecoding)
+        putBoolean("speculative_v2", s.speculativeDecoding)
+        putBoolean("deepSearch", s.deepSearch)
         putString("searxngUrl", s.searxngUrl.trim())
         putString("hfToken", s.hfToken.trim())
         putString("searchRegion", s.searchRegion)

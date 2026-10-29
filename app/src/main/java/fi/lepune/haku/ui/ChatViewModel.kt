@@ -11,6 +11,7 @@ import fi.lepune.haku.data.ModelManager
 import fi.lepune.haku.data.ModelSpec
 import fi.lepune.haku.data.Settings
 import fi.lepune.haku.data.SettingsStore
+import fi.lepune.haku.llm.DeepSearch
 import fi.lepune.haku.llm.LlmEngine
 import fi.lepune.haku.llm.LoadException
 import fi.lepune.haku.llm.LoadedModel
@@ -43,6 +44,7 @@ data class ChatMessage(
     val stats: String? = null,
     val error: String? = null,
     val done: Boolean = true,
+    val deep: Boolean = false,
 )
 
 sealed interface EngineState {
@@ -59,6 +61,9 @@ data class UiState(
     val settings: Settings = Settings(),
     val files: Map<String, ModelFileState> = emptyMap(),
     val importing: Pair<String, Long>? = null,
+    val sharedStorage: Boolean = false,
+    /** Model ids that sit in app-private storage (lost on uninstall). */
+    val privateCopies: Set<String> = emptySet(),
 )
 
 class ChatViewModel(app: Application) : AndroidViewModel(app) {
@@ -77,6 +82,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     @Volatile private var activeId = -1L
 
     private val tools = SearchTools(web) { ev -> onToolEvent(ev) }
+    private val deep = DeepSearch(llm, web)
 
     init {
         refreshFiles()
@@ -95,6 +101,11 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     private fun refreshFiles() {
         val before = _state.value.files
         val now = ModelCatalog.ALL.associate { it.id to models.state(it) }
+        val shared = models.hasSharedAccess()
+        val priv = ModelCatalog.ALL.filter { models.isPrivateCopy(it) }.map { it.id }.toSet()
+        if (shared != _state.value.sharedStorage || priv != _state.value.privateCopies) {
+            _state.update { it.copy(sharedStorage = shared, privateCopies = priv) }
+        }
         if (now != before) {
             _state.update { it.copy(files = now) }
             // Auto-load when the selected model finishes downloading.
@@ -162,6 +173,22 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    fun moveToShared(spec: ModelSpec) {
+        viewModelScope.launch {
+            try {
+                _state.update { it.copy(importing = spec.id to 0L) }
+                models.moveToShared(spec) { bytes -> _state.update { it.copy(importing = spec.id to bytes) } }
+            } catch (t: Throwable) {
+                _state.update { it.copy(engine = EngineState.Error(spec, "Move failed: ${t.message}")) }
+            } finally {
+                _state.update { it.copy(importing = null) }
+                refreshFiles()
+            }
+        }
+    }
+
+    fun setDeep(on: Boolean) = updateSettings(_state.value.settings.copy(deepSearch = on))
+
     fun updateSettings(new: Settings, reload: Boolean = false) {
         val old = _state.value.settings
         store.save(new)
@@ -191,11 +218,20 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         if (q.isEmpty() || _state.value.generating) return
         if (_state.value.engine !is EngineState.Ready) return
 
-        val user = ChatMessage(nextId++, Role.USER, q)
-        val reply = ChatMessage(nextId++, Role.ASSISTANT, "", status = "Thinking…", done = false)
+        val spec = (_state.value.engine as EngineState.Ready).model.spec
+        val useDeep = _state.value.settings.deepSearch && spec.supportsTools
+
+        val user = ChatMessage(nextId++, Role.USER, q, deep = useDeep)
+        val reply = ChatMessage(nextId++, Role.ASSISTANT, "", status = if (useDeep) "Planning…" else "Thinking…",
+            done = false, deep = useDeep)
         activeId = reply.id
         _state.update { it.copy(messages = it.messages + user + reply, generating = true) }
         tools.resetBudget()
+
+        if (useDeep) {
+            sendDeep(q)
+            return
+        }
 
         genJob = viewModelScope.launch(Dispatchers.IO) {
             val start = SystemClock.elapsedRealtime()
@@ -211,6 +247,45 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 }
                 val end = SystemClock.elapsedRealtime()
                 editActive { it.copy(done = true, status = null, stats = stats(start, firstTokenAt, end, chars)) }
+            } catch (e: CancellationException) {
+                editActive { it.copy(done = true, status = null, stats = "stopped") }
+                throw e
+            } catch (t: Throwable) {
+                editActive { it.copy(done = true, status = null, error = t.message ?: t.javaClass.simpleName) }
+            } finally {
+                activeId = -1L
+                _state.update { it.copy(generating = false) }
+            }
+        }
+    }
+
+    private fun sendDeep(q: String) {
+        genJob = viewModelScope.launch(Dispatchers.IO) {
+            val start = SystemClock.elapsedRealtime()
+            var firstTokenAt = 0L
+            var chars = 0
+            try {
+                val sources = deep.run(q) { ev ->
+                    when (ev) {
+                        is DeepSearch.Event.Step -> editActive { it.copy(status = ev.label, steps = it.steps + ev.label) }
+                        is DeepSearch.Event.Searched -> editActive { it.copy(searched = (it.searched + ev.hits).distinctBy { h -> h.url }) }
+                        is DeepSearch.Event.Read -> editActive { it.copy(read = (it.read + ev.hit).distinctBy { h -> h.url }) }
+                        is DeepSearch.Event.Token -> {
+                            if (firstTokenAt == 0L) firstTokenAt = SystemClock.elapsedRealtime()
+                            chars += ev.text.length
+                            editActive { it.copy(text = it.text + ev.text, status = null) }
+                        }
+                    }
+                }
+                val end = SystemClock.elapsedRealtime()
+                val list = if (sources.isEmpty()) "" else "\n\n**Sources**\n" + sources.joinToString("\n") {
+                    "${it.n}. [${it.title.replace("[", "(").replace("]", ")").take(80)}](${it.url})"
+                }
+                val total = "%.0f s total".format((end - start) / 1000.0)
+                editActive {
+                    it.copy(text = it.text + list, done = true, status = null,
+                        stats = listOfNotNull(total, stats(start, firstTokenAt, end, chars)?.substringAfter(" · ")).joinToString(" · "))
+                }
             } catch (e: CancellationException) {
                 editActive { it.copy(done = true, status = null, stats = "stopped") }
                 throw e

@@ -37,26 +37,26 @@ class WebTools(private val settings: () -> Settings) {
 
     // ---------------------------------------------------------------- web search
 
-    fun webSearch(query: String): List<Hit> = offMain {
+    fun webSearch(query: String, limit: Int = MAX_HITS): List<Hit> = offMain {
         val searx = settings().searxngUrl.trim().trimEnd('/')
-        if (searx.isNotEmpty()) searxng(searx, query)
-        else duckDuckGo(query).ifEmpty { duckDuckGoLite(query) }
+        if (searx.isNotEmpty()) searxng(searx, query, limit)
+        else duckDuckGo(query, limit).ifEmpty { duckDuckGoLite(query, limit) }
     }
 
-    private fun searxng(base: String, query: String): List<Hit> {
+    private fun searxng(base: String, query: String, limit: Int): List<Hit> {
         val url = "$base/search".toHttpUrl().newBuilder()
             .addQueryParameter("q", query)
             .addQueryParameter("format", "json")
             .build()
         val body = get(url.toString())
         val results = JSONObject(body).optJSONArray("results") ?: return emptyList()
-        return (0 until minOf(results.length(), MAX_HITS)).map {
+        return (0 until minOf(results.length(), limit)).map {
             val r = results.getJSONObject(it)
             Hit(r.optString("title"), r.optString("url"), r.optString("content").take(SNIPPET))
         }
     }
 
-    private fun duckDuckGo(query: String): List<Hit> {
+    private fun duckDuckGo(query: String, limit: Int): List<Hit> {
         val form = FormBody.Builder()
             .add("q", query)
             .add("kl", settings().searchRegion)
@@ -77,11 +77,11 @@ class WebTools(private val settings: () -> Settings) {
                 Hit(a.text(), url, r.selectFirst(".result__snippet")?.text().orEmpty().take(SNIPPET))
             }
             .filterNot { it.url.contains("duckduckgo.com/y.js") }
-            .take(MAX_HITS)
+            .take(limit)
             .toList()
     }
 
-    private fun duckDuckGoLite(query: String): List<Hit> {
+    private fun duckDuckGoLite(query: String, limit: Int): List<Hit> {
         val url = "https://lite.duckduckgo.com/lite/".toHttpUrl().newBuilder()
             .addQueryParameter("q", query)
             .addQueryParameter("kl", settings().searchRegion)
@@ -89,7 +89,7 @@ class WebTools(private val settings: () -> Settings) {
         val doc = Jsoup.parse(get(url.toString(), BROWSER_UA))
         val links = doc.select("a.result-link")
         val snippets = doc.select("td.result-snippet")
-        return links.take(MAX_HITS).mapIndexedNotNull { i, a ->
+        return links.take(limit).mapIndexedNotNull { i, a ->
             val u = unwrapDdg(a.attr("href")) ?: return@mapIndexedNotNull null
             Hit(a.text(), u, snippets.getOrNull(i)?.text().orEmpty().take(SNIPPET))
         }
@@ -187,6 +187,25 @@ class WebTools(private val settings: () -> Settings) {
         return ReadResult(title, url, text.ifBlank { "Error: no readable text on page." })
     }
 
+    /** Raw page for deep-search extraction (structured data + text). */
+    fun fetchDoc(url: String): Document = offMain {
+        val req = Request.Builder().url(url).header("User-Agent", BROWSER_UA)
+            .header("Accept-Language", "fi-FI,fi;q=0.9,en;q=0.8").build()
+        deepClient.newCall(req).execute().use { resp ->
+            if (!resp.isSuccessful) throw java.io.IOException("HTTP ${resp.code}")
+            val type = resp.header("Content-Type").orEmpty()
+            if (type.isNotEmpty() && !type.contains("html")) throw java.io.IOException("not a web page ($type)")
+            // Cap at 3 MB; some shop pages are enormous.
+            val bytes = resp.body?.source()?.let { src -> src.request(3L shl 20); src.buffer.readByteArray(minOf(src.buffer.size, 3L shl 20)) }
+                ?: ByteArray(0)
+            Jsoup.parse(java.io.ByteArrayInputStream(bytes), null, resp.request.url.toString()) // charset sniffed from <meta>
+        }
+    }
+
+    private val deepClient by lazy {
+        client.newBuilder().callTimeout(15, TimeUnit.SECONDS).readTimeout(10, TimeUnit.SECONDS).build()
+    }
+
     // ---------------------------------------------------------------- http
 
     private fun get(url: String, ua: String = APP_UA): String {
@@ -207,7 +226,7 @@ class WebTools(private val settings: () -> Settings) {
         const val MAX_PAGE_CHARS = 6000
         const val APP_UA = "Haku/0.1 (https://github.com/Lepune/haku; on-device search assistant)"
         const val BROWSER_UA =
-            "Mozilla/5.0 (Linux; Android 15; Pixel 9 Pro XL) AppleWebKit/537.36 (KHTML, like Gecko) " +
+            "Mozilla/5.0 (Linux; Android 15; K) AppleWebKit/537.36 (KHTML, like Gecko) " +
                 "Chrome/131.0.0.0 Mobile Safari/537.36"
     }
 }

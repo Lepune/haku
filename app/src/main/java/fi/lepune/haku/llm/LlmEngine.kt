@@ -90,26 +90,65 @@ class LlmEngine(private val context: Context) {
         }
     }
 
+    private var mainSystem: String = ""
+    private var mainTools: ToolSet? = null
+    @Volatile private var temp: Conversation? = null
+
     /** Start a fresh conversation (new chat). */
     suspend fun newConversation(systemPrompt: String, tools: ToolSet?) = mutex.withLock {
         withContext(Dispatchers.IO) {
             runCatching { conversation?.close() }
-            val e = checkNotNull(engine) { "Model not loaded" }
-            conversation = e.createConversation(
-                ConversationConfig(
-                    systemInstruction = Contents.of(systemPrompt),
-                    tools = if (tools != null) listOf(tool(tools)) else emptyList(),
-                    samplerConfig = SamplerConfig(topK = 40, topP = 0.95, temperature = 0.5),
-                )
-            )
+            mainSystem = systemPrompt
+            mainTools = tools
+            conversation = create(systemPrompt, tools, temperature = 0.5)
         }
     }
 
-    fun send(text: String): Flow<Message> =
-        checkNotNull(conversation) { "No conversation" }.sendMessageAsync(text)
+    private fun create(system: String, tools: ToolSet?, temperature: Double): Conversation {
+        val e = checkNotNull(engine) { "Model not loaded" }
+        return e.createConversation(
+            ConversationConfig(
+                systemInstruction = Contents.of(system),
+                tools = if (tools != null) listOf(tool(tools)) else emptyList(),
+                samplerConfig = SamplerConfig(topK = 40, topP = 0.95, temperature = temperature),
+            )
+        )
+    }
+
+    /** Send into the main chat. Recreated lazily if a deep search used the engine in between. */
+    fun send(text: String): Flow<Message> {
+        val c = synchronized(this) {
+            conversation ?: create(mainSystem, mainTools, temperature = 0.5).also { conversation = it }
+        }
+        return c.sendMessageAsync(text)
+    }
+
+    /**
+     * Run [block] on a throwaway conversation with no tools (deep-search planning/synthesis).
+     * Closes the main chat's context; the next [send] starts a fresh one.
+     */
+    suspend fun <T> isolated(system: String, temperature: Double, block: suspend (Conversation) -> T): T {
+        val c = mutex.withLock {
+            withContext(Dispatchers.IO) {
+                synchronized(this@LlmEngine) {
+                    runCatching { conversation?.close() }
+                    conversation = null
+                }
+                create(system, null, temperature)
+            }
+        }
+        temp = c
+        try {
+            return block(c)
+        } finally {
+            temp = null
+            withContext(Dispatchers.IO) { runCatching { c.close() } }
+        }
+    }
 
     fun cancel() {
         runCatching { conversation?.cancelProcess() }
+        runCatching { temp?.cancelProcess() }
     }
 
     suspend fun close() = mutex.withLock { withContext(Dispatchers.IO) { closeInternal() } }

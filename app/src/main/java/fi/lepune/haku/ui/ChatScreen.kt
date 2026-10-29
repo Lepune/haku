@@ -37,6 +37,7 @@ import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -72,6 +73,7 @@ fun ChatScreen(
     onStop: () -> Unit,
     onNewChat: () -> Unit,
     onOpenSetup: () -> Unit,
+    onDeepChange: (Boolean) -> Unit,
 ) {
     var input by rememberSaveable { mutableStateOf(initialText.orEmpty()) }
     val listState = rememberLazyListState()
@@ -114,7 +116,7 @@ fun ChatScreen(
             Box(Modifier.weight(1f).fillMaxWidth()) {
                 when {
                     state.engine !is EngineState.Ready -> EngineGate(state.engine, onOpenSetup)
-                    state.messages.isEmpty() -> EmptyHints(onPick = { input = it })
+                    state.messages.isEmpty() -> EmptyHints(state.settings.deepSearch)
                     else -> LazyColumn(
                         state = listState,
                         contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
@@ -132,6 +134,8 @@ fun ChatScreen(
                 onValueChange = { input = it },
                 enabled = state.engine is EngineState.Ready,
                 generating = state.generating,
+                deep = state.settings.deepSearch,
+                onDeepChange = onDeepChange,
                 onSend = { onSend(input); input = "" },
                 onStop = onStop,
             )
@@ -194,26 +198,21 @@ private fun EngineGate(e: EngineState, onOpenSetup: () -> Unit) {
 }
 
 @Composable
-private fun EmptyHints(onPick: (String) -> Unit) {
-    val hints = listOf(
-        "Kuka on Suomen nykyinen pääministeri?",
-        "Mikä on Jyväskylän väkiluku?",
-        "Explain ACSR conductor construction",
-        "Bitcoinin hinta euroina tänään",
-    )
+private fun EmptyHints(deep: Boolean) {
     Column(
         Modifier.fillMaxSize().padding(24.dp),
         verticalArrangement = Arrangement.Center,
     ) {
-        Text("Ask anything. Haku searches when it needs to.", style = MaterialTheme.typography.titleMedium)
-        Spacer(Modifier.height(16.dp))
-        hints.forEach { h ->
-            Surface(
-                shape = RoundedCornerShape(12.dp),
-                color = MaterialTheme.colorScheme.surfaceVariant,
-                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp).clickable { onPick(h) },
-            ) { Text(h, Modifier.padding(14.dp), style = MaterialTheme.typography.bodyMedium) }
-        }
+        Text("Ask anything.", style = MaterialTheme.typography.titleMedium)
+        Spacer(Modifier.height(8.dp))
+        Text(
+            if (deep) "Deep search is on: Haku plans several searches, reads up to 8 pages and answers " +
+                "with numbered sources. Takes 20–60 s. Best for shopping, comparisons and anything current."
+            else "Quick mode: answers directly or does a couple of searches. Switch on Deep below for " +
+                "research questions like prices across shops.",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
     }
 }
 
@@ -313,10 +312,25 @@ private fun InputBar(
     onValueChange: (String) -> Unit,
     enabled: Boolean,
     generating: Boolean,
+    deep: Boolean,
+    onDeepChange: (Boolean) -> Unit,
     onSend: () -> Unit,
     onStop: () -> Unit,
 ) {
     Surface(tonalElevation = 3.dp) {
+      Column {
+        Row(
+            Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, top = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            FilterChip(
+                selected = deep,
+                onClick = { onDeepChange(!deep) },
+                enabled = !generating,
+                label = { Text(if (deep) "Deep search" else "Quick") },
+                leadingIcon = { Icon(Icons.Default.Search, null, Modifier.size(16.dp)) },
+            )
+        }
         Row(
             Modifier
                 .fillMaxWidth()
@@ -343,5 +357,6 @@ private fun InputBar(
                 }
             }
         }
+      }
     }
 }

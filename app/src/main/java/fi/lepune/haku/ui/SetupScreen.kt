@@ -1,6 +1,8 @@
 package fi.lepune.haku.ui
 
+import android.content.Intent
 import android.net.Uri
+import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
@@ -46,6 +48,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -82,9 +85,13 @@ fun SetupScreen(
         ) {
             EngineStatusCard(state.engine, onRetry = vm::loadSelectedIfPresent)
 
+            StorageCard(state.sharedStorage)
+
             SectionTitle("Model")
             ModelCatalog.ALL.forEach { spec ->
                 ModelCard(
+                    canMoveToShared = state.sharedStorage && spec.id in state.privateCopies,
+                    onMoveToShared = { vm.moveToShared(spec) },
                     spec = spec,
                     selected = state.settings.modelId == spec.id,
                     file = state.files[spec.id] ?: ModelFileState.Missing,
@@ -109,12 +116,12 @@ fun SetupScreen(
                 }
             }
             Hint(
-                "GPU is the fast path on Pixel 9. NPU only works with the Tensor G4 NPU test model " +
+                "GPU is the fast path. NPU only works with the Tensor G4 NPU test model " +
                     "(Gemma 4 has no Tensor G4 NPU build yet); with other models NPU falls back to GPU, then CPU."
             )
             SwitchRow(
-                "Multi-token prediction",
-                "Speculative decoding. Up to ~2x faster generation on GPU.",
+                "Multi-token prediction (experimental)",
+                "Faster generation, but may garble numbers and words. Leave off unless testing.",
                 state.settings.speculativeDecoding,
             ) { vm.updateSettings(state.settings.copy(speculativeDecoding = it)) }
 
@@ -165,6 +172,32 @@ fun SetupScreen(
 }
 
 @Composable
+private fun StorageCard(shared: Boolean) {
+    val ctx = LocalContext.current
+    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
+        Column(Modifier.padding(16.dp).fillMaxWidth()) {
+            Text("Model storage", style = MaterialTheme.typography.labelLarge)
+            if (shared) {
+                Text("Download/Haku — kept if the app is uninstalled or reinstalled.",
+                    style = MaterialTheme.typography.bodySmall)
+            } else {
+                Text("App-private — deleted on uninstall. Allow file access to keep models in " +
+                    "Download/Haku instead, so reinstalls don't need a re-download.",
+                    style = MaterialTheme.typography.bodySmall)
+                TextButton(onClick = {
+                    runCatching {
+                        ctx.startActivity(
+                            Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+                                Uri.parse("package:${ctx.packageName}"))
+                        )
+                    }
+                }) { Text("Allow file access") }
+            }
+        }
+    }
+}
+
+@Composable
 private fun EngineStatusCard(e: EngineState, onRetry: () -> Unit) {
     Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
         Column(Modifier.padding(16.dp).fillMaxWidth()) {
@@ -201,6 +234,8 @@ private fun EngineStatusCard(e: EngineState, onRetry: () -> Unit) {
 
 @Composable
 private fun ModelCard(
+    canMoveToShared: Boolean,
+    onMoveToShared: () -> Unit,
     spec: ModelSpec,
     selected: Boolean,
     file: ModelFileState,
@@ -258,10 +293,15 @@ private fun ModelCard(
                     else LinearProgressIndicator(Modifier.fillMaxWidth().padding(vertical = 4.dp))
                     TextButton(onClick = onCancel) { Text("Cancel") }
                 }
-                is ModelFileState.Ready -> Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("Downloaded · ${file.bytes shr 20} MB", style = MaterialTheme.typography.bodySmall,
-                        modifier = Modifier.weight(1f))
-                    TextButton(onClick = onDelete) { Text("Delete") }
+                is ModelFileState.Ready -> Column {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("Downloaded · ${file.bytes shr 20} MB" + if (file.shared) " · Download/Haku" else " · app-private",
+                            style = MaterialTheme.typography.bodySmall, modifier = Modifier.weight(1f))
+                        TextButton(onClick = onDelete) { Text("Delete") }
+                    }
+                    if (canMoveToShared) {
+                        OutlinedButton(onClick = onMoveToShared) { Text("Move to Download/Haku") }
+                    }
                 }
             }
         }
