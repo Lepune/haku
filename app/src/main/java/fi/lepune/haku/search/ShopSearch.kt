@@ -158,11 +158,19 @@ class ShopSearch(
             val price = SNIPPET_PRICE.find(text)?.groupValues?.get(1)?.let(::parseEuro) ?: continue
             offers += Offer(h.title, price, host(h.url), h.url, null, finnish = false, fromSnippet = true)
         }
-        return offers
-            .filter { it.price in 1.0..1_000_000.0 }
+        val sane = offers.filter { it.price in 1.0..1_000_000.0 }
+        // Drop prices far from the real offers' median: parse errors (13 602,50 €) and snippet
+        // prices of some other product (170 € "RTX 3060"). Needs 3+ real offers to judge.
+        val real = sane.filterNot { it.fromSnippet }.map { it.price }.sorted()
+        val kept = if (real.size < 3) sane else {
+            val median = real[real.size / 2]
+            sane.filter { it.price in median * OUTLIER_LOW..median * OUTLIER_HIGH }
+        }
+        return kept
             .sortedByDescending { it.finnish } // keep the FI-badged copy when deduplicating
             .distinctBy { brand(it.shop) + "|" + "%.2f".format(it.price) }
-            .sortedBy { it.price }
+            // Snippet prices are least reliable: never let one top the list.
+            .sortedWith(compareBy<Offer>({ it.fromSnippet }, { it.price }))
             .take(MAX_ROWS)
     }
 
@@ -220,6 +228,8 @@ class ShopSearch(
     companion object {
         private const val MAX_PAGES = 12
         private const val MAX_ROWS = 15
+        private const val OUTLIER_LOW = 0.4
+        private const val OUTLIER_HIGH = 3.0
         private const val MAX_RENDER = 4
         private const val RENDER_BUDGET_MS = 12_000L
         /** Price-comparison sites: their lists are already read from structured data. */

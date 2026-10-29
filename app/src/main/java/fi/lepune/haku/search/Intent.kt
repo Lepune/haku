@@ -50,6 +50,30 @@ object Intent {
             }
             .distinct()
 
+    private val VARIANTS = listOf("ti", "super", "xtx", "xt", "max", "pro", "plus", "mini")
+
+    /**
+     * True when [title] names every model code of the query as the same model: "RTX 3060 12GB"
+     * matches "3060", "RTX 3060 Ti" does not (unless the query said Ti too).
+     */
+    fun sameModel(title: String, query: String): Boolean {
+        val codes = modelCodes(query)
+        if (codes.isEmpty()) return true
+        val t = compact(title)
+        val q = compact(query)
+        return codes.all { code ->
+            var i = t.indexOf(code)
+            var ok = false
+            while (i >= 0 && !ok) {
+                val after = t.substring(i + code.length)
+                val variant = VARIANTS.firstOrNull { after.startsWith(it) }
+                ok = variant == null || q.contains(code + variant)
+                i = t.indexOf(code, i + 1)
+            }
+            ok
+        }
+    }
+
     /** Lowercase, letters and digits only: "MI-100" and "MI 100" both become "mi100". */
     fun compact(s: String) = s.lowercase().filter { it.isLetterOrDigit() }
 

@@ -16,6 +16,8 @@ data class ToriItem(
     /** price / median price of similar listings; < 1 = cheaper than usual. */
     val dealRatio: Double?,
     val sold: Boolean = false,
+    /** Close in meaning but not the asked model (e.g. GTX 1660 for "RTX 3060"). */
+    val similar: Boolean = false,
 ) {
     /** "−42 %" style discount vs similar listings, only when it's meaningfully cheaper. */
     val dealPercent: Int? get() = dealRatio?.takeIf { it in 0.0..0.85 }?.let { ((1 - it) * 100).toInt() }

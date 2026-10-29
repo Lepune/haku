@@ -343,6 +343,16 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /**
+     * The index searches by meaning, so "RTX 3060" also returns GTX 1660s. With a model code in
+     * the query, the exact model comes first (up to 8) and at most 4 others follow as "similar".
+     */
+    private fun rankTori(q: String, items: List<ToriItem>): List<ToriItem> {
+        if (Intent.modelCodes(Intent.productTerms(q)).isEmpty()) return items.take(8)
+        val (exact, other) = items.partition { Intent.sameModel(it.title, q) }
+        return exact.take(8) + other.take(4).map { it.copy(similar = true) }
+    }
+
     fun deleteHunt(id: Long) {
         huntStore.delete(id)
         _state.update { it.copy(hunts = huntStore.list()) }
@@ -398,8 +408,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         val q = msg.question ?: return
         fun eur(v: Double) = String.format(java.util.Locale.ROOT, "%.2f €", v).replace('.', ',')
         val ctx = buildString {
-            msg.offers?.takeIf { it.isNotEmpty() }?.let { offers ->
-                append("Price list already found (cheapest first):\n")
+            // Snippet prices are guesses from search results; the model trusted them over real offers.
+            msg.offers?.filterNot { it.fromSnippet }?.takeIf { it.isNotEmpty() }?.let { offers ->
+                append("New, from shops (cheapest first):\n")
                 offers.forEachIndexed { i, o ->
                     append("${i + 1}. ${eur(o.price)}")
                     if (o.from) append(" (from)")
@@ -411,8 +422,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     append('\n')
                 }
             }
-            msg.tori?.takeIf { it.isNotEmpty() }?.let { items ->
-                append("Second-hand listings on Tori (own index):\n")
+            msg.tori?.filterNot { it.similar }?.takeIf { it.isNotEmpty() }?.let { items ->
+                append("Used, private sellers on Tori:\n")
                 items.forEachIndexed { i, t ->
                     append("${i + 1}. ${t.price?.let(::eur) ?: "no price"} — ${t.title}")
                     t.city?.let { append(", $it") }
@@ -426,10 +437,13 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 r.take(8).forEachIndexed { i, h -> append("${i + 1}. ${h.title} (${h.url}) — ${h.snippet}\n") }
             }
         }
+        val compare = if (msg.tori.orEmpty().any { !it.similar } && msg.offers.orEmpty().any { !it.fromSnippet })
+            "\nGive the cheapest new offer and the cheapest used Tori listing separately (price, shop or city). " +
+                "Only the asked model; ignore other models." else ""
         val few = msg.offers.orEmpty().size in 1..2
         val note = if (few) "\nOnly ${msg.offers!!.size} offer(s) were found: say that the list is thin, " +
             "mention whether delivery or currency changes the picture, and search the web for other listings." else ""
-        send(q, Mode.ASK, context = (ctx + note).ifBlank { null })
+        send(q, Mode.ASK, context = (ctx + compare + note).ifBlank { null })
     }
 
     fun send(text: String, modeOverride: Mode? = null, context: String? = null) {
@@ -515,7 +529,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     // Own Tori index in parallel: fast, shown as soon as it answers.
                     val replyId = reply.id
                     val toriD = if (!tori.enabled) null else async {
-                        runCatching { tori.search(Intent.productTerms(q)) }
+                        runCatching { rankTori(q, tori.search(Intent.productTerms(q), limit = 20)) }
                             .onFailure { e -> editMsg(replyId) { m -> m.copy(steps = m.steps + "⚠ Tori index: ${e.message}") } }
                             .getOrNull()
                             ?.also { items -> editMsg(replyId) { m -> m.copy(tori = items) } }

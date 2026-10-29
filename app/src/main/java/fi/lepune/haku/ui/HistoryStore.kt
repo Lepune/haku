@@ -111,6 +111,7 @@ class HistoryStore(context: Context) {
         put("id", t.id); put("t", t.title); put("u", t.url)
         t.price?.let { put("p", it) }; t.city?.let { put("c", it) }
         t.publishedAt?.let { put("d", it) }; t.dealRatio?.let { put("r", it) }
+        if (t.similar) put("sim", true)
     }
 
     private fun toriOf(o: JSONObject) = ToriItem(
@@ -119,6 +120,7 @@ class HistoryStore(context: Context) {
         city = o.optString("c").ifEmpty { null },
         publishedAt = o.optString("d").ifEmpty { null },
         dealRatio = if (o.has("r")) o.optDouble("r") else null,
+        similar = o.optBoolean("sim"),
     )
 
     private fun offer(o: Offer) = JSONObject().apply {
