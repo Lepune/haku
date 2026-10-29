@@ -1,5 +1,7 @@
 package fi.lepune.haku.data
 
+enum class ModelKind { CHAT, EMBEDDING }
+
 data class ModelSpec(
     val id: String,
     val name: String,
@@ -13,6 +15,7 @@ data class ModelSpec(
     val npuOnly: Boolean = false,
     /** Context window to allocate. null = model default. */
     val maxTokens: Int? = 12288,
+    val kind: ModelKind = ModelKind.CHAT,
 ) {
     val url: String get() = "https://huggingface.co/$repo/resolve/main/$fileName?download=true"
 }
@@ -49,8 +52,23 @@ object ModelCatalog {
         maxTokens = null,
     )
 
-    val ALL = listOf(GEMMA4_E4B, GEMMA4_E2B, GEMMA3_1B_G4_NPU)
+    val EMBEDDER = ModelSpec(
+        id = "embed-270m",
+        name = "EmbeddingGemma 2 · 270M",
+        repo = "litert-community/embeddinggemma-2-text-270m-litert-lm",
+        fileName = "embeddinggemma-2-text-270m.litertlm",
+        approxSizeMb = 165,
+        description = "Ranks page passages by meaning in Deep search instead of keyword matching. " +
+            "Runs on the CPU alongside Gemma. Recommended.",
+        supportsTools = false,
+        maxTokens = null,
+        kind = ModelKind.EMBEDDING,
+    )
+
+    val CHAT = listOf(GEMMA4_E4B, GEMMA4_E2B, GEMMA3_1B_G4_NPU)
+    val ALL = CHAT + EMBEDDER
     val DEFAULT = GEMMA4_E4B
 
     fun byId(id: String) = ALL.firstOrNull { it.id == id }
+    fun chatById(id: String) = CHAT.firstOrNull { it.id == id }
 }

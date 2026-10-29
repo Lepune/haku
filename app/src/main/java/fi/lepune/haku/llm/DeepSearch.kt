@@ -23,7 +23,12 @@ import java.util.Locale
  *   2. write the answer from a compact evidence pack
  * Searching, choosing pages, reading and extracting are plain code.
  */
-class DeepSearch(private val llm: LlmEngine, private val web: WebTools) {
+class DeepSearch(
+    private val llm: LlmEngine,
+    private val web: WebTools,
+    /** Returns a ready embedder, or null to fall back to keyword ranking. */
+    private val embedder: suspend () -> Embedder?,
+) {
 
     sealed interface Event {
         data class Step(val label: String) : Event
@@ -33,6 +38,15 @@ class DeepSearch(private val llm: LlmEngine, private val web: WebTools) {
     }
 
     data class Source(val n: Int, val title: String, val url: String)
+
+    private data class Scored(val index: Int, val text: String, val score: Float)
+
+    private data class PageRead(
+        val hit: Hit,
+        val products: List<PageExtractor.Product>,
+        val chunks: List<Scored>,
+        val keywordText: String,
+    )
 
     suspend fun run(question: String, emit: (Event) -> Unit): List<Source> {
         // 1. plan
@@ -56,9 +70,13 @@ class DeepSearch(private val llm: LlmEngine, private val web: WebTools) {
         val pages = pickPages(perQuery, MAX_PAGES)
         emit(Event.Step("Reading ${pages.size} pages"))
 
-        // 4. read + extract in parallel
+        // 4. read + extract in parallel. Each page's chunks are embedded as soon as it arrives,
+        //    so ranking (CPU) overlaps with downloading (network).
+        val emb = embedder()
+        val qVec = emb?.let { e -> runCatching { withContext(Dispatchers.IO) { e.embedQuery(question) } }.getOrNull() }
+        if (qVec == null) emit(Event.Step("Keyword ranking" + (emb?.lastError?.let { " (embedder: $it)" } ?: " (no embedding model)")))
         val sem = Semaphore(4)
-        val evidence = coroutineScope {
+        val pagesRead = coroutineScope {
             pages.map { hit ->
                 async(Dispatchers.IO) {
                     sem.withPermit {
@@ -66,10 +84,20 @@ class DeepSearch(private val llm: LlmEngine, private val web: WebTools) {
                             runCatching {
                                 val doc = web.fetchDoc(hit.url)
                                 val products = PageExtractor.products(doc)
-                                val text = PageExtractor.passages(doc, question, maxChars = 900)
                                 val title = doc.title().ifBlank { hit.title }
+                                val scored: List<Scored> = if (qVec != null && emb != null) {
+                                    runCatching {
+                                        val chunks = PageExtractor.chunks(doc)
+                                        val vecs = if (chunks.isEmpty()) emptyList() else emb.embedDocs(chunks)
+                                        chunks.mapIndexed { i, c ->
+                                            val bonus = if (PageExtractor.hasPrice(c)) PRICE_BONUS else 0f
+                                            Scored(i, c, Embedder.cosine(qVec, vecs[i]) + bonus)
+                                        }
+                                    }.getOrElse { emptyList() }
+                                } else emptyList()
+                                val keywordText = if (scored.isEmpty()) PageExtractor.passages(doc, question, maxChars = 900) else ""
                                 emit(Event.Read(Hit(title, hit.url, "")))
-                                Triple(Hit(title, hit.url, hit.snippet), products, text)
+                                PageRead(Hit(title, hit.url, hit.snippet), products, scored, keywordText)
                             }.getOrElse {
                                 emit(Event.Step("⚠ ${host(hit.url)}: ${it.message ?: "unreadable"}"))
                                 null
@@ -80,8 +108,35 @@ class DeepSearch(private val llm: LlmEngine, private val web: WebTools) {
             }.awaitAll().filterNotNull()
         }
 
+        // Semantic selection: best chunks across ALL pages, within a character budget.
+        val evidence: List<Triple<Hit, List<PageExtractor.Product>, String>> = if (qVec != null) {
+            val all = pagesRead.flatMapIndexed { p, r -> r.chunks.map { p to it } }
+            val chosen = mutableMapOf<Int, MutableList<Scored>>()
+            var budget = TEXT_BUDGET
+            for ((p, sc) in all.sortedByDescending { it.second.score }) {
+                if (sc.score < MIN_SCORE) break
+                val list = chosen.getOrPut(p) { mutableListOf() }
+                if (list.size >= MAX_CHUNKS_PER_PAGE || sc.text.length > budget) continue
+                list += sc; budget -= sc.text.length
+                if (budget < 200) break
+            }
+            emit(Event.Step("Ranked ${all.size} passages by meaning, kept ${chosen.values.sumOf { it.size }}"))
+            pagesRead.mapIndexed { p, r ->
+                val best = chosen[p].orEmpty()
+                Triple(p, best.maxOfOrNull { it.score } ?: -1f, r to best.sortedBy { it.index }.joinToString("\n") { it.text })
+            }
+                .filter { (_, _, pr) -> pr.first.chunks.isNotEmpty() && (pr.second.isNotBlank() || pr.first.products.isNotEmpty()) }
+                .sortedByDescending { it.second }
+                .map { (_, _, pr) -> Triple(pr.first.hit, pr.first.products, pr.second) }
+                // Pages whose embedding failed still contribute their keyword passages.
+                .plus(pagesRead.filter { it.chunks.isEmpty() && (it.keywordText.isNotBlank() || it.products.isNotEmpty()) }
+                    .map { Triple(it.hit, it.products, it.keywordText) })
+        } else {
+            pagesRead.map { Triple(it.hit, it.products, it.keywordText) }
+        }
+
         // Keep search snippets for pages that failed to load — still better than nothing.
-        val readUrls = evidence.map { it.first.url }.toSet()
+        val readUrls = pagesRead.map { it.hit.url }.toSet()
         val snippetOnly = pages.filter { it.url !in readUrls && it.snippet.isNotBlank() }
 
         val sources = mutableListOf<Source>()
@@ -201,6 +256,10 @@ Rules:
     companion object {
         private const val MAX_PAGES = 8
         private const val MAX_EVIDENCE_CHARS = 16_000
+        private const val TEXT_BUDGET = 9_000
+        private const val MAX_CHUNKS_PER_PAGE = 4
+        private const val MIN_SCORE = 0.15f
+        private const val PRICE_BONUS = 0.03f
         private const val PLANNER_SYSTEM = "You write web search queries. Output only the queries, one per line."
         private val SKIP_HOSTS = listOf(
             "youtube.com", "youtu.be", "facebook.com", "instagram.com", "tiktok.com", "x.com",

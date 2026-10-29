@@ -12,6 +12,7 @@ import fi.lepune.haku.data.ModelSpec
 import fi.lepune.haku.data.Settings
 import fi.lepune.haku.data.SettingsStore
 import fi.lepune.haku.llm.DeepSearch
+import fi.lepune.haku.llm.Embedder
 import fi.lepune.haku.llm.LlmEngine
 import fi.lepune.haku.llm.LoadException
 import fi.lepune.haku.llm.LoadedModel
@@ -82,7 +83,13 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     @Volatile private var activeId = -1L
 
     private val tools = SearchTools(web) { ev -> onToolEvent(ev) }
-    private val deep = DeepSearch(llm, web)
+    private val embedder = Embedder(app)
+    private val deep = DeepSearch(llm, web) {
+        val spec = ModelCatalog.EMBEDDER
+        if (models.state(spec) is ModelFileState.Ready) {
+            embedder.ensure(models.file(spec)); embedder
+        } else null
+    }
 
     init {
         refreshFiles()
@@ -156,6 +163,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             viewModelScope.launch { llm.close() }
             _state.update { it.copy(engine = EngineState.NoModel) }
         }
+        if (spec.id == ModelCatalog.EMBEDDER.id) embedder.close()
         models.delete(spec); refreshFiles()
     }
 
@@ -332,6 +340,6 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     override fun onCleared() {
         cancelGeneration()
         // viewModelScope is already cancelled here; release native memory on a plain thread.
-        Thread { kotlinx.coroutines.runBlocking { llm.close() } }.start()
+        Thread { kotlinx.coroutines.runBlocking { llm.close() }; embedder.close() }.start()
     }
 }

@@ -56,6 +56,7 @@ import androidx.compose.ui.unit.dp
 import fi.lepune.haku.data.BackendPref
 import fi.lepune.haku.data.ModelCatalog
 import fi.lepune.haku.data.ModelFileState
+import fi.lepune.haku.data.ModelKind
 import fi.lepune.haku.data.ModelSpec
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -88,7 +89,7 @@ fun SetupScreen(
             StorageCard(state.sharedStorage)
 
             SectionTitle("Model")
-            ModelCatalog.ALL.forEach { spec ->
+            ModelCatalog.CHAT.forEach { spec ->
                 ModelCard(
                     canMoveToShared = state.sharedStorage && spec.id in state.privateCopies,
                     onMoveToShared = { vm.moveToShared(spec) },
@@ -97,6 +98,24 @@ fun SetupScreen(
                     file = state.files[spec.id] ?: ModelFileState.Missing,
                     importingBytes = state.importing?.takeIf { it.first == spec.id }?.second,
                     onSelect = { vm.selectModel(spec.id) },
+                    onDownload = { vm.download(spec) },
+                    onCancel = { vm.cancelDownload(spec) },
+                    onDelete = { vm.delete(spec) },
+                    onImport = { uri -> vm.import(spec, uri) },
+                )
+            }
+
+            SectionTitle("Deep search ranking")
+            ModelCatalog.EMBEDDER.let { spec ->
+                ModelCard(
+                    canMoveToShared = state.sharedStorage && spec.id in state.privateCopies,
+                    onMoveToShared = { vm.moveToShared(spec) },
+                    spec = spec,
+                    selected = false,
+                    selectable = false,
+                    file = state.files[spec.id] ?: ModelFileState.Missing,
+                    importingBytes = state.importing?.takeIf { it.first == spec.id }?.second,
+                    onSelect = {},
                     onDownload = { vm.download(spec) },
                     onCancel = { vm.cancelDownload(spec) },
                     onDelete = { vm.delete(spec) },
@@ -238,6 +257,7 @@ private fun ModelCard(
     onMoveToShared: () -> Unit,
     spec: ModelSpec,
     selected: Boolean,
+    selectable: Boolean = true,
     file: ModelFileState,
     importingBytes: Long?,
     onSelect: () -> Unit,
@@ -254,15 +274,17 @@ private fun ModelCard(
             containerColor = if (selected) MaterialTheme.colorScheme.secondaryContainer
             else MaterialTheme.colorScheme.surfaceContainerLow
         ),
-        modifier = Modifier.fillMaxWidth().selectable(selected, onClick = onSelect),
+        modifier = Modifier.fillMaxWidth().let { if (selectable) it.selectable(selected, onClick = onSelect) else it },
     ) {
         Column(Modifier.padding(16.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                RadioButton(selected, onClick = null)
-                Spacer(Modifier.width(8.dp))
+                if (selectable) {
+                    RadioButton(selected, onClick = null)
+                    Spacer(Modifier.width(8.dp))
+                }
                 Column(Modifier.weight(1f)) {
                     Text(spec.name, fontWeight = FontWeight.SemiBold)
-                    Text("~${"%.1f".format(spec.approxSizeMb / 1000.0)} GB · ${if (spec.supportsTools) "search tools" else "chat only"}",
+                    Text("~${"%.1f".format(spec.approxSizeMb / 1000.0)} GB · ${when { spec.kind == ModelKind.EMBEDDING -> "ranking"; spec.supportsTools -> "search tools"; else -> "chat only" }}",
                         style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }

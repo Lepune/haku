@@ -25,7 +25,7 @@ class SettingsStore(context: Context) {
     private val prefs = context.getSharedPreferences("haku", Context.MODE_PRIVATE)
 
     fun load(): Settings = Settings(
-        modelId = prefs.getString("modelId", null)?.takeIf { ModelCatalog.byId(it) != null }
+        modelId = prefs.getString("modelId", null)?.takeIf { ModelCatalog.chatById(it) != null }
             ?: ModelCatalog.DEFAULT.id,
         backend = runCatching { BackendPref.valueOf(prefs.getString("backend", "GPU")!!) }
             .getOrDefault(BackendPref.GPU),
