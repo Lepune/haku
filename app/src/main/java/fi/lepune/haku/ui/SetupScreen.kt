@@ -145,6 +145,37 @@ fun SetupScreen(
             ) { vm.updateSettings(state.settings.copy(speculativeDecoding = it)) }
 
             HorizontalDivider()
+            SectionTitle("Price alerts")
+            if (state.watches.isEmpty()) {
+                Hint("None yet. Tap \"Seuraa hintaa\" under a price list; Haku re-checks every ~6 h and notifies when it gets cheaper.")
+            } else {
+                state.watches.forEach { w ->
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text(w.query, maxLines = 1)
+                            Text(
+                                "Lowest " + String.format(java.util.Locale.ROOT, "%.2f €", w.bestPrice).replace('.', ',') +
+                                    " · ${w.bestShop}",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        TextButton(onClick = { vm.deleteWatch(w.id) }) { Text("Remove") }
+                    }
+                }
+                OutlinedButton(onClick = vm::checkWatchesNow) { Text("Check now") }
+            }
+
+            HorizontalDivider()
+            SectionTitle("History")
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("${state.recent.size} saved searches and chats, stored only on this phone.",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.weight(1f))
+                TextButton(onClick = vm::clearHistory, enabled = state.recent.isNotEmpty()) { Text("Clear") }
+            }
+
+            HorizontalDivider()
             SectionTitle("Search")
             var searx by remember(state.settings.searxngUrl) { mutableStateOf(state.settings.searxngUrl) }
             OutlinedTextField(

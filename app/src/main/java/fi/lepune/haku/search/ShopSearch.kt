@@ -20,9 +20,23 @@ import kotlin.math.ceil
  * search engines + Finnish price comparison sites → open result pages in parallel →
  * read schema.org offers → keep only matching products → sort by price.
  */
-class ShopSearch(private val web: WebTools) {
+class ShopSearch(
+    private val web: WebTools,
+    /** Off-screen browser for JavaScript-only shops; null in background jobs. */
+    private val renderer: (suspend (String) -> org.jsoup.nodes.Document?)? = null,
+) {
 
-    suspend fun run(question: String, step: (String) -> Unit): ShopResult {
+    private data class Page(val hit: Hit, val offers: List<PageExtractor.RawOffer>, val finnish: Boolean)
+
+    /**
+     * [partial] receives the first list as soon as plain pages are read; the final result adds
+     * shops that needed the off-screen browser.
+     */
+    suspend fun run(
+        question: String,
+        step: (String) -> Unit,
+        partial: (ShopResult) -> Unit = {},
+    ): ShopResult {
         val t0 = SystemClock.elapsedRealtime()
         val terms = Intent.productTerms(question)
         val wantDims = Intent.dims(question).map(::dimKey)
@@ -50,11 +64,10 @@ class ShopSearch(private val web: WebTools) {
             .take(MAX_PAGES)
         val tSearch = SystemClock.elapsedRealtime()
 
-        // 2. open pages in parallel and read their offers
+        // 2. plain download of every page in parallel
         step("Reading ${hits.size} pages")
         val pageSem = Semaphore(MAX_PAGES)
-        data class Page(val hit: Hit, val offers: List<PageExtractor.RawOffer>, val finnish: Boolean)
-        val pages = coroutineScope {
+        val fetched = coroutineScope {
             hits.map { h ->
                 async(Dispatchers.IO) {
                     pageSem.withPermit {
@@ -69,8 +82,45 @@ class ShopSearch(private val web: WebTools) {
             }.awaitAll().filterNotNull()
         }
         val tRead = SystemClock.elapsedRealtime()
+        fun sec(ms: Long) = "%.1f".format(ms / 1000.0)
 
-        // 3. match, normalise, sort
+        val first = assemble(fetched, hits, wantDims, wantStems)
+        val baseSummary = "search ${sec(tSearch - t0)} s · read ${sec(tRead - tSearch)} s"
+
+        // 3. pages that look right but gave no price: render them like a browser would
+        val pricedUrls = fetched.filter { p -> p.offers.any { matches(it.name, wantDims, wantStems) } }.map { it.hit.url }.toSet()
+        val toRender = if (renderer == null) emptyList() else hits.filter { h ->
+            h.url !in pricedUrls && host(h.url) !in COMPARISON && matches(h.title + " " + h.snippet, wantDims, wantStems)
+        }.take(MAX_RENDER)
+        if (toRender.isEmpty()) {
+            return ShopResult(first, "${first.size} offers from ${fetched.size} pages · $baseSummary")
+        }
+        partial(ShopResult(first, "${first.size} offers so far · rendering ${toRender.size} more…"))
+        step("Rendering ${toRender.size} JavaScript pages: " + toRender.joinToString(", ") { host(it.url) })
+
+        val rendered = withTimeoutOrNull(RENDER_BUDGET_MS) {
+            coroutineScope {
+                toRender.map { h ->
+                    async {
+                        val doc = renderer!!.invoke(h.url) ?: return@async null
+                        val offer = PageExtractor.visibleOffer(doc) ?: return@async null
+                        Page(h, listOf(offer), PageExtractor.isFinnishCompany(doc))
+                    }
+                }.awaitAll().filterNotNull()
+            }
+        }.orEmpty()
+        val tRender = SystemClock.elapsedRealtime()
+
+        val renderedUrls = rendered.map { it.hit.url }.toSet()
+        val all = fetched.filterNot { it.hit.url in renderedUrls } + rendered
+        val merged = assemble(all, hits, wantDims, wantStems)
+        return ShopResult(
+            merged,
+            "${merged.size} offers from ${all.size} pages · $baseSummary · render ${sec(tRender - tRead)} s (${rendered.size}/${toRender.size})",
+        )
+    }
+
+    private fun assemble(pages: List<Page>, hits: List<Hit>, wantDims: List<String>, wantStems: Set<String>): List<Offer> {
         val offers = mutableListOf<Offer>()
         for (p in pages) {
             val host = host(p.hit.url)
@@ -83,11 +133,11 @@ class ShopSearch(private val web: WebTools) {
                     name = o.name, price = o.price, shop = if (thirdParty) o.seller!! else host, url = p.hit.url,
                     inStock = o.inStock,
                     finnish = p.finnish && !thirdParty, // a seller listed on a comparison site: origin unknown
-                    via = if (thirdParty) host else null, from = o.isLowest,
+                    via = if (thirdParty) host else null, from = o.isLowest, shipping = o.shipping,
                 )
             }
         }
-        // Pages we couldn't read (or without structured data): try the price in the search snippet.
+        // Pages without a usable price: fall back to a price shown in the search snippet.
         val pagesWithOffers = pages.filter { it.offers.isNotEmpty() }.map { it.hit.url }.toSet()
         for (h in hits) {
             if (h.url in pagesWithOffers) continue
@@ -96,18 +146,12 @@ class ShopSearch(private val web: WebTools) {
             val price = SNIPPET_PRICE.find(text)?.groupValues?.get(1)?.let(::parseEuro) ?: continue
             offers += Offer(h.title, price, host(h.url), h.url, null, finnish = false, fromSnippet = true)
         }
-
-        val sorted = offers
+        return offers
             .filter { it.price in 1.0..1_000_000.0 }
             .sortedByDescending { it.finnish } // keep the FI-badged copy when deduplicating
             .distinctBy { brand(it.shop) + "|" + "%.2f".format(it.price) }
             .sortedBy { it.price }
             .take(MAX_ROWS)
-
-        fun sec(ms: Long) = "%.1f".format(ms / 1000.0)
-        val summary = "${sorted.size} offers from ${pages.size} pages · " +
-            "search ${sec(tSearch - t0)} s · read ${sec(tRead - tSearch)} s"
-        return ShopResult(sorted, summary)
     }
 
     // ------------------------------------------------------------------ matching
@@ -153,6 +197,10 @@ class ShopSearch(private val web: WebTools) {
     companion object {
         private const val MAX_PAGES = 12
         private const val MAX_ROWS = 15
+        private const val MAX_RENDER = 4
+        private const val RENDER_BUDGET_MS = 12_000L
+        /** Price-comparison sites: their lists are already read from structured data. */
+        private val COMPARISON = setOf("hinta.fi", "hintaopas.fi", "hintaseuranta.fi", "pricerunner.com")
         private val SNIPPET_PRICE = Regex("""(\d{1,3}(?:[  .]\d{3})*,\d{2})\s?€""")
         private val SKIP = listOf(
             "youtube.com", "facebook.com", "instagram.com", "tiktok.com", "reddit.com", "wikipedia.org",

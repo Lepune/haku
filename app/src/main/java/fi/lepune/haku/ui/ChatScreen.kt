@@ -1,6 +1,11 @@
 package fi.lepune.haku.ui
 
+import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.ContextCompat
 import android.net.Uri
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.clickable
@@ -78,7 +83,20 @@ fun ChatScreen(
     onOpenSetup: () -> Unit,
     onModeChange: (Mode) -> Unit,
     onAskGemma: (String) -> Unit,
+    onOpenConversation: (Long) -> Unit,
+    onDeleteConversation: (Long) -> Unit,
+    onWatch: (Long) -> Unit,
+    onDiscussions: (Long) -> Unit,
 ) {
+    val ctx = LocalContext.current
+    val notifPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { }
+    val watchWithPermission: (Long) -> Unit = { id ->
+        if (android.os.Build.VERSION.SDK_INT >= 33 &&
+            ContextCompat.checkSelfPermission(ctx, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) notifPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+        onWatch(id)
+    }
+    val watched = state.watches.map { it.query.lowercase() }.toSet()
     var input by rememberSaveable { mutableStateOf(initialText.orEmpty()) }
     val listState = rememberLazyListState()
 
@@ -102,7 +120,7 @@ fun ChatScreen(
                     }
                 },
                 actions = {
-                    IconButton(onClick = onNewChat, enabled = state.engine is EngineState.Ready) {
+                    IconButton(onClick = onNewChat, enabled = state.messages.isNotEmpty()) {
                         Icon(Icons.Default.Add, "New chat")
                     }
                     IconButton(onClick = onOpenSetup) { Icon(Icons.Default.Settings, "Models and settings") }
@@ -121,7 +139,8 @@ fun ChatScreen(
                 when {
                     state.engine !is EngineState.Ready && state.settings.mode != Mode.SEARCH &&
                         state.messages.isEmpty() -> EngineGate(state.engine, onOpenSetup)
-                    state.messages.isEmpty() -> EmptyHints(state.settings.mode)
+                    state.messages.isEmpty() -> HomeScreen(state.settings.mode, state.recent,
+                        onOpenConversation, onDeleteConversation)
                     else -> LazyColumn(
                         state = listState,
                         contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
@@ -130,7 +149,14 @@ fun ChatScreen(
                     ) {
                         items(state.messages, key = { it.id }) { msg ->
                             if (msg.role == Role.USER) UserBubble(msg.text)
-                            else AssistantBlock(msg, canAsk = state.engine is EngineState.Ready && !state.generating, onAskGemma = onAskGemma)
+                            else AssistantBlock(
+                                msg,
+                                canAsk = state.engine is EngineState.Ready && !state.generating,
+                                watched = msg.question?.lowercase()?.let { it in watched } == true,
+                                onAskGemma = onAskGemma,
+                                onWatch = watchWithPermission,
+                                onDiscussions = onDiscussions,
+                            )
                         }
                     }
                 }
@@ -204,25 +230,64 @@ private fun EngineGate(e: EngineState, onOpenSetup: () -> Unit) {
 }
 
 @Composable
-private fun EmptyHints(mode: Mode) {
-    Column(
-        Modifier.fillMaxSize().padding(24.dp),
-        verticalArrangement = Arrangement.Center,
+private fun HomeScreen(
+    mode: Mode,
+    recent: List<Conversation>,
+    onOpen: (Long) -> Unit,
+    onDelete: (Long) -> Unit,
+) {
+    LazyColumn(
+        Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 16.dp),
     ) {
-        Text("Ask anything.", style = MaterialTheme.typography.titleMedium)
-        Spacer(Modifier.height(8.dp))
-        Text(
-            when (mode) {
-                Mode.SEARCH -> "Haku: results in seconds, no AI writing. Price questions (\"halvin …\", \"hinta\") " +
-                    "give a list sorted by price; anything else gives web results. Tap \"Kysy Gemmalta\" " +
-                    "under a result for a written answer."
-                Mode.ASK -> "Kysy: Gemma answers and searches when it needs to."
-                Mode.RESEARCH -> "Tutki: Gemma plans several searches, reads up to 6 pages and writes a sourced " +
-                    "answer. Slowest, most thorough."
-            },
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
+        item {
+            Text(
+                when (mode) {
+                    Mode.SEARCH -> "Haku: results in seconds, no AI writing. Price questions (\"halvin …\", \"hinta\") " +
+                        "give a list sorted by price; anything else gives web results."
+                    Mode.ASK -> "Kysy: Gemma answers and searches when it needs to."
+                    Mode.RESEARCH -> "Tutki: Gemma searches several sources, reads the pages and writes a " +
+                        "sourced answer. Slowest, most thorough."
+                },
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(bottom = 16.dp),
+            )
+        }
+        if (recent.isNotEmpty()) {
+            item {
+                Text("Recent", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.padding(bottom = 4.dp))
+            }
+            items(recent, key = { it.id }) { c ->
+                Row(
+                    Modifier.fillMaxWidth().clickable { onOpen(c.id) }.padding(vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text(c.title, style = MaterialTheme.typography.bodyLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text(
+                            c.mode.label + " · " + relativeTime(c.updatedAt),
+                            style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.outline,
+                        )
+                    }
+                    IconButton(onClick = { onDelete(c.id) }) {
+                        Icon(Icons.Default.Close, "Delete", tint = MaterialTheme.colorScheme.outline)
+                    }
+                }
+            }
+        }
+    }
+}
+
+private fun relativeTime(t: Long): String {
+    val min = (System.currentTimeMillis() - t) / 60_000
+    return when {
+        min < 1 -> "just now"
+        min < 60 -> "$min min ago"
+        min < 24 * 60 -> "${min / 60} h ago"
+        min < 7 * 24 * 60 -> "${min / (24 * 60)} d ago"
+        else -> java.text.DateFormat.getDateInstance(java.text.DateFormat.SHORT).format(java.util.Date(t))
     }
 }
 
@@ -243,7 +308,14 @@ private fun UserBubble(text: String) {
 }
 
 @Composable
-private fun AssistantBlock(msg: ChatMessage, canAsk: Boolean, onAskGemma: (String) -> Unit) {
+private fun AssistantBlock(
+    msg: ChatMessage,
+    canAsk: Boolean,
+    watched: Boolean,
+    onAskGemma: (String) -> Unit,
+    onWatch: (Long) -> Unit,
+    onDiscussions: (Long) -> Unit,
+) {
     var showSteps by remember { mutableStateOf(false) }
     Column(Modifier.fillMaxWidth()) {
         if (msg.steps.isNotEmpty()) {
@@ -295,10 +367,34 @@ private fun AssistantBlock(msg: ChatMessage, canAsk: Boolean, onAskGemma: (Strin
                 Text(it, style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.outline, modifier = Modifier.padding(top = 4.dp))
             }
-            if (msg.mode == Mode.SEARCH && msg.question != null && canAsk) {
-                TextButton(onClick = { onAskGemma(msg.question) }, contentPadding = PaddingValues(0.dp)) {
-                    Text("Kysy Gemmalta →")
+            if (msg.mode == Mode.SEARCH && msg.question != null) {
+                Row(
+                    Modifier.horizontalScroll(rememberScrollState()).padding(top = 4.dp),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    if (!msg.offers.isNullOrEmpty()) {
+                        AssistChip(
+                            onClick = { if (!watched) onWatch(msg.id) },
+                            label = { Text(if (watched) "Seurataan ✓" else "Seuraa hintaa") },
+                        )
+                    }
+                    if (msg.discussions == null) {
+                        AssistChip(
+                            onClick = { onDiscussions(msg.id) },
+                            enabled = !msg.loadingDiscussions,
+                            label = { Text(if (msg.loadingDiscussions) "Haetaan…" else "Keskustelut") },
+                        )
+                    }
+                    if (canAsk) {
+                        AssistChip(onClick = { onAskGemma(msg.question) }, label = { Text("Kysy Gemmalta") })
+                    }
                 }
+            }
+            msg.discussions?.let { d ->
+                Text("Keskustelut", style = MaterialTheme.typography.titleSmall,
+                    modifier = Modifier.padding(top = 10.dp, bottom = 2.dp))
+                if (d.isEmpty()) Text("No discussion threads found.", style = MaterialTheme.typography.bodySmall)
+                else ResultsList(d)
             }
         }
     }
@@ -390,17 +486,28 @@ private fun InputBar(
 private fun OffersCard(offers: List<Offer>) {
     val ctx = LocalContext.current
     var finnishOnly by remember { mutableStateOf(false) }
-    val shown = if (finnishOnly) offers.filter { it.finnish } else offers
+    var byTotal by remember { mutableStateOf(false) }
+    val filtered = if (finnishOnly) offers.filter { it.finnish } else offers
+    // Unknown shipping sorts after known totals so "with delivery" ranking stays honest.
+    val shown = if (byTotal) filtered.sortedWith(compareBy<Offer>({ it.total == null }, { it.total ?: it.price })) else filtered
     Column(Modifier.fillMaxWidth()) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
                 if (offers.isEmpty()) "No prices found" else "Cheapest first",
                 style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f),
             )
+        }
+        Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             if (offers.any { it.finnish }) {
                 FilterChip(
                     selected = finnishOnly, onClick = { finnishOnly = !finnishOnly },
                     label = { Text("Vain FI-yritykset") },
+                )
+            }
+            if (offers.any { it.shipping != null }) {
+                FilterChip(
+                    selected = byTotal, onClick = { byTotal = !byTotal },
+                    label = { Text("Sis. toimitus") },
                 )
             }
         }
@@ -425,6 +532,7 @@ private fun OffersCard(offers: List<Offer>) {
                             add(o.shop)
                             o.via?.let { add("via $it") }
                             when (o.inStock) { true -> add("in stock"); false -> add("out of stock"); null -> {} }
+                            o.shipping?.let { add(if (it == 0.0) "free delivery" else "delivery " + euro(it)) }
                             if (o.fromSnippet) add("price from search snippet")
                         }.joinToString(" · ")
                         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -439,10 +547,16 @@ private fun OffersCard(offers: List<Offer>) {
                         }
                     }
                     Spacer(Modifier.size(8.dp))
-                    Text(
-                        (if (o.from) "alk. " else "") + "%.2f €".format(o.price).replace('.', ','),
-                        style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold,
-                    )
+                    Column(horizontalAlignment = Alignment.End) {
+                        Text(
+                            (if (o.from) "alk. " else "") + euro(o.price),
+                            style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold,
+                        )
+                        o.total?.takeIf { o.shipping != 0.0 }?.let {
+                            Text("yht. " + euro(it), style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                    }
                 }
             }
         }
@@ -492,3 +606,5 @@ private fun ResultsList(results: List<Hit>) {
         }
     }
 }
+
+private fun euro(v: Double) = String.format(java.util.Locale.ROOT, "%.2f €", v).replace('.', ',')

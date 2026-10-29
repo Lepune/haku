@@ -126,6 +126,8 @@ object PageExtractor {
         val inStock: Boolean?,
         val seller: String?,
         val isLowest: Boolean = false,
+        /** Cheapest delivery cost the page states, if any. */
+        val shipping: Double? = null,
     )
 
     /** Every priced offer on the page (all sellers on comparison sites, one price on shop pages). */
@@ -176,17 +178,55 @@ object PageExtractor {
                 val single = priceNumber(offers.optString("price").ifBlank {
                     offers.optJSONObject("priceSpecification")?.optString("price").orEmpty()
                 })
+                val shipping = shippingOf(offers.opt("shippingDetails"))
                 if (single != null && single > 0) {
-                    out += RawOffer(name, single, currency, stock, seller)
+                    out += RawOffer(name, single, currency, stock, seller, shipping = shipping)
                 } else {
                     // AggregateOffer on comparison sites: keep the lowest, and recurse into listed offers
                     priceNumber(offers.optString("lowPrice"))?.takeIf { it > 0 }?.let {
-                        out += RawOffer(name, it, currency, stock, seller, isLowest = true)
+                        out += RawOffer(name, it, currency, stock, seller, isLowest = true, shipping = shipping)
                     }
                     if (offers.has("offers")) offersOf(name, offers.opt("offers"), out)
                 }
             }
         }
+    }
+
+    private val VISIBLE_PRICE = Regex("""(\d{1,3}(?:[ \u00a0.]\d{3})*(?:,\d{1,2})?)\s?€""")
+
+    /**
+     * Last resort for rendered pages: product title from <h1>, price from the first price-looking
+     * element. Only trusted on single-product pages (exactly one <h1>).
+     */
+    fun visibleOffer(doc: Document): RawOffer? {
+        offers(doc).firstOrNull()?.let { return it }
+        val h1s = doc.select("h1")
+        if (h1s.size != 1) return null
+        val name = h1s.first()!!.text().trim().ifBlank { return null }
+        val candidates = doc.select("[itemprop=price], [class*=price], [class*=Price], [class*=hinta], [data-price]")
+        for (el in candidates) {
+            val txt = el.attr("content").ifBlank { el.text() }
+            val m = VISIBLE_PRICE.find(txt) ?: continue
+            val v = priceNumber(m.groupValues[1].replace(" ", "").replace("\u00a0", "")) ?: continue
+            if (v > 0) return RawOffer(name, v, "EUR", null, null)
+        }
+        return null
+    }
+
+    /** schema.org OfferShippingDetails -> cheapest shippingRate.value (object or array). */
+    private fun shippingOf(node: Any?): Double? = when (node) {
+        is JSONArray -> (0 until node.length()).mapNotNull { shippingOf(node.opt(it)) }.minOrNull()
+        is JSONObject -> {
+            val rate = node.opt("shippingRate")
+            when (rate) {
+                is JSONObject -> priceNumber(rate.optString("value").ifBlank { rate.optString("price") })
+                is JSONArray -> (0 until rate.length()).mapNotNull { i ->
+                    rate.optJSONObject(i)?.let { priceNumber(it.optString("value")) }
+                }.minOrNull()
+                else -> null
+            }
+        }
+        else -> null
     }
 
     private val Y_TUNNUS = Regex("""(y-?tunnus|business id|fo-nummer)\W{0,5}\d{7}-\d""", RegexOption.IGNORE_CASE)

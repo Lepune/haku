@@ -34,6 +34,8 @@ class MainActivity : ComponentActivity() {
                     BackHandler { showSetup = false }
                     SetupScreen(state = state, vm = vm, onBack = { showSetup = false })
                 } else {
+                    // One back swipe from a conversation returns to the home screen.
+                    BackHandler(enabled = state.messages.isNotEmpty()) { vm.goHome() }
                     ChatScreen(
                         state = state,
                         initialText = shared,
@@ -43,6 +45,10 @@ class MainActivity : ComponentActivity() {
                         onOpenSetup = { showSetup = true },
                         onModeChange = vm::setMode,
                         onAskGemma = { q -> vm.send(q, fi.lepune.haku.data.Mode.ASK) },
+                        onOpenConversation = vm::openConversation,
+                        onDeleteConversation = vm::deleteConversation,
+                        onWatch = vm::watchPrice,
+                        onDiscussions = vm::loadDiscussions,
                     )
                 }
             }

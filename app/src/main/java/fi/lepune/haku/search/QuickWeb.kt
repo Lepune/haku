@@ -29,4 +29,19 @@ class QuickWeb(private val web: WebTools) {
         val ms = SystemClock.elapsedRealtime() - t0
         WebResult(r, i, "${r.size} results · %.1f s".format(ms / 1000.0))
     }
+
+    /** What people say: forum and community threads (Reddit, io-tech, Suomi24, Vauva.fi). */
+    suspend fun discussions(question: String): List<Hit> = coroutineScope {
+        val terms = Intent.productTerms(question)
+        val sites = if (Intent.isFinnish(question))
+            listOf("io-tech.fi", "suomi24.fi", "reddit.com", "vauva.fi")
+        else listOf("reddit.com", "io-tech.fi", "stackexchange.com", "news.ycombinator.com")
+        val lists = sites.map { site ->
+            async(Dispatchers.IO) { runCatching { web.webSearch("site:$site $terms", limit = 4) }.getOrDefault(emptyList()) }
+        }.map { it.await() }
+        // Interleave so every forum gets a voice near the top.
+        val out = mutableListOf<Hit>()
+        for (i in 0 until 4) for (l in lists) l.getOrNull(i)?.let(out::add)
+        out.distinctBy { it.url }.take(10)
+    }
 }

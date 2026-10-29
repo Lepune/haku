@@ -4,6 +4,7 @@
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <!-- Optional: lets models live in Download/Haku so they survive reinstalls. -->
     <uses-permission
         android:name="android.permission.MANAGE_EXTERNAL_STORAGE"

@@ -23,6 +23,9 @@ import fi.lepune.haku.search.Offer
 import fi.lepune.haku.search.QuickWeb
 import fi.lepune.haku.search.ShopSearch
 import fi.lepune.haku.tools.Hit
+import fi.lepune.haku.tools.PageRenderer
+import fi.lepune.haku.alerts.PriceWatches
+import fi.lepune.haku.alerts.Watch
 import fi.lepune.haku.tools.SearchTools
 import fi.lepune.haku.tools.ToolEvent
 import fi.lepune.haku.tools.WebTools
@@ -56,6 +59,8 @@ data class ChatMessage(
     val offers: List<Offer>? = null,
     val results: List<Hit>? = null,
     val instant: Hit? = null,
+    val discussions: List<Hit>? = null,
+    val loadingDiscussions: Boolean = false,
 )
 
 sealed interface EngineState {
@@ -75,6 +80,8 @@ data class UiState(
     val sharedStorage: Boolean = false,
     /** Model ids that sit in app-private storage (lost on uninstall). */
     val privateCopies: Set<String> = emptySet(),
+    val recent: List<Conversation> = emptyList(),
+    val watches: List<Watch> = emptyList(),
 )
 
 class ChatViewModel(app: Application) : AndroidViewModel(app) {
@@ -88,13 +95,18 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
     private var genJob: Job? = null
     private var nextId = 1L
+    private val history = HistoryStore(app)
+    private val watchStore = PriceWatches(app)
+    /** History id of the conversation on screen; null = home screen / not yet saved. */
+    private var currentConvId: Long? = null
 
     /** Assistant message currently receiving tool events. */
     @Volatile private var activeId = -1L
 
     private val tools = SearchTools(web) { ev -> onToolEvent(ev) }
     private val embedder = Embedder(app)
-    private val shop = ShopSearch(web)
+    private val renderer = PageRenderer(app)
+    private val shop = ShopSearch(web) { url -> renderer.render(url) }
     private val quickWeb = QuickWeb(web)
     private val deep = DeepSearch(llm, web) {
         val spec = ModelCatalog.EMBEDDER
@@ -104,6 +116,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     init {
+        _state.update { it.copy(recent = history.list(), watches = watchStore.list()) }
+        watchStore.schedule()
         refreshFiles()
         viewModelScope.launch {
             // Poll download progress; cheap and keeps the models screen live.
@@ -223,14 +237,85 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
     // ------------------------------------------------------------------ chat
 
-    fun newChat() {
+    /** Back to the home screen: keep the conversation in history, start a fresh model context. */
+    fun goHome() {
         cancelGeneration()
+        saveCurrent()
+        currentConvId = null
+        _state.update { it.copy(messages = emptyList(), generating = false) }
+        resetModelContext()
+    }
+
+    fun newChat() = goHome()
+
+    fun openConversation(id: Long) {
+        val c = _state.value.recent.firstOrNull { it.id == id } ?: return
+        cancelGeneration()
+        saveCurrent()
+        currentConvId = c.id
+        nextId = (c.messages.maxOfOrNull { it.id } ?: 0L) + 1
+        _state.update { it.copy(messages = c.messages, generating = false) }
+        // The model can't resume an old context; follow-ups start fresh.
+        resetModelContext()
+    }
+
+    fun deleteConversation(id: Long) {
+        history.delete(id)
+        if (currentConvId == id) currentConvId = null
+        _state.update { it.copy(recent = history.list()) }
+    }
+
+    fun clearHistory() {
+        history.clear()
+        _state.update { it.copy(recent = emptyList()) }
+    }
+
+    /** Start watching the price search behind [msgId]; baseline = today's cheapest real offer. */
+    fun watchPrice(msgId: Long) {
+        val msg = _state.value.messages.firstOrNull { it.id == msgId } ?: return
+        val q = msg.question ?: return
+        val best = msg.offers.orEmpty().filterNot { it.fromSnippet || it.from }.minByOrNull { it.price }
+            ?: msg.offers.orEmpty().minByOrNull { it.price } ?: return
+        watchStore.upsert(Watch(System.currentTimeMillis(), q, best.price, best.shop, best.url, System.currentTimeMillis()))
+        _state.update { it.copy(watches = watchStore.list()) }
+    }
+
+    fun deleteWatch(id: Long) {
+        watchStore.delete(id)
+        _state.update { it.copy(watches = watchStore.list()) }
+    }
+
+    fun checkWatchesNow() = watchStore.checkNow()
+
+    fun loadDiscussions(msgId: Long) {
+        val msg = _state.value.messages.firstOrNull { it.id == msgId } ?: return
+        val q = msg.question ?: return
+        if (msg.loadingDiscussions || msg.discussions != null) return
+        fun edit(f: (ChatMessage) -> ChatMessage) =
+            _state.update { s -> s.copy(messages = s.messages.map { if (it.id == msgId) f(it) else it }) }
+        edit { it.copy(loadingDiscussions = true) }
+        viewModelScope.launch(Dispatchers.IO) {
+            val d = runCatching { quickWeb.discussions(q) }.getOrDefault(emptyList())
+            edit { it.copy(discussions = d, loadingDiscussions = false) }
+            saveCurrent()
+        }
+    }
+
+    private fun resetModelContext() {
         val ready = _state.value.engine as? EngineState.Ready ?: return
-        _state.update { it.copy(messages = emptyList()) }
         viewModelScope.launch {
             val spec = ready.model.spec
             runCatching { llm.newConversation(systemPrompt(spec), if (spec.supportsTools) tools else null) }
         }
+    }
+
+    private fun saveCurrent() {
+        val msgs = _state.value.messages.filter { it.done }
+        if (msgs.none { it.role == Role.ASSISTANT }) return
+        val id = currentConvId ?: System.currentTimeMillis().also { currentConvId = it }
+        val title = msgs.firstOrNull { it.role == Role.USER }?.text?.take(80) ?: "…"
+        runCatching { history.save(Conversation(id, title, msgs.first().mode, System.currentTimeMillis(), msgs)) }
+        _state.update { it.copy(recent = history.list()) }
     }
 
     fun send(text: String, modeOverride: Mode? = null) {
@@ -280,6 +365,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             } finally {
                 activeId = -1L
                 _state.update { it.copy(generating = false) }
+                saveCurrent()
             }
         }
     }
@@ -296,7 +382,11 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         genJob = viewModelScope.launch(Dispatchers.IO) {
             try {
                 if (shopping) {
-                    val r = shop.run(q) { label -> editActive { it.copy(status = label, steps = it.steps + label) } }
+                    val r = shop.run(
+                        q,
+                        step = { label -> editActive { it.copy(status = label, steps = it.steps + label) } },
+                        partial = { p -> editActive { it.copy(offers = p.offers, stats = p.summary) } },
+                    )
                     editActive { it.copy(offers = r.offers, stats = r.summary, done = true, status = null) }
                 } else {
                     val r = quickWeb.run(q)
@@ -310,6 +400,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             } finally {
                 activeId = -1L
                 _state.update { it.copy(generating = false) }
+                saveCurrent()
             }
         }
     }
@@ -351,6 +442,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             } finally {
                 activeId = -1L
                 _state.update { it.copy(generating = false) }
+                saveCurrent()
             }
         }
     }

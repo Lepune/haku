@@ -17,7 +17,11 @@ data class Offer(
     val from: Boolean = false,
     /** Price read from a search snippet only — less reliable. */
     val fromSnippet: Boolean = false,
-)
+    /** Delivery cost when the shop's product data states it. */
+    val shipping: Double? = null,
+) {
+    val total: Double? get() = shipping?.let { price + it }
+}
 
 data class ShopResult(val offers: List<Offer>, val summary: String)
 
