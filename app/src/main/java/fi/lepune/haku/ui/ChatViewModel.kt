@@ -344,13 +344,19 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /**
-     * The index searches by meaning, so "RTX 3060" also returns GTX 1660s. With a model code in
-     * the query, the exact model comes first (up to 8) and at most 4 others follow as "similar".
+     * The index searches by meaning, so "RTX 3060" also returns GTX 1660s and gaming PCs.
+     * With a model code in the query: the exact part cheapest first (max 8), then whole
+     * computers that contain it (max 4), then at most 4 similar models.
      */
     private fun rankTori(q: String, items: List<ToriItem>): List<ToriItem> {
         if (Intent.modelCodes(Intent.productTerms(q)).isEmpty()) return items.take(8)
+        val byPrice = compareBy<ToriItem>({ it.price == null }, { it.price ?: 0.0 })
         val (exact, other) = items.partition { Intent.sameModel(it.title, q) }
-        return exact.take(8) + other.take(4).map { it.copy(similar = true) }
+        val wantsComputer = Intent.isComputer(q)
+        val (pcs, parts) = exact.partition { !wantsComputer && Intent.isComputer(it.title) }
+        return parts.sortedWith(byPrice).take(8) +
+            pcs.sortedWith(byPrice).take(4).map { it.copy(inComputer = true) } +
+            other.take(4).map { it.copy(similar = true) }
     }
 
     fun deleteHunt(id: Long) {
@@ -409,10 +415,12 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         fun eur(v: Double) = String.format(java.util.Locale.ROOT, "%.2f €", v).replace('.', ',')
         val ctx = buildString {
             // Snippet prices are guesses from search results; the model trusted them over real offers.
+            // One running source number across shops and Tori, so citations point at one row each.
+            var n = 0
             msg.offers?.filterNot { it.fromSnippet }?.takeIf { it.isNotEmpty() }?.let { offers ->
                 append("New, from shops (cheapest first):\n")
-                offers.forEachIndexed { i, o ->
-                    append("${i + 1}. ${eur(o.price)}")
+                offers.forEach { o ->
+                    append("[${++n}] ${eur(o.price)}")
                     if (o.from) append(" (from)")
                     o.shipping?.let { append(" + delivery ${eur(it)}") }
                     o.fx?.let { append(" (converted from $it)") }
@@ -422,10 +430,10 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     append('\n')
                 }
             }
-            msg.tori?.filterNot { it.similar }?.takeIf { it.isNotEmpty() }?.let { items ->
-                append("Used, private sellers on Tori:\n")
-                items.forEachIndexed { i, t ->
-                    append("${i + 1}. ${t.price?.let(::eur) ?: "no price"} — ${t.title}")
+            msg.tori?.filterNot { it.similar || it.inComputer }?.takeIf { it.isNotEmpty() }?.let { items ->
+                append("Used, private sellers on Tori (cheapest first):\n")
+                items.forEach { t ->
+                    append("[${++n}] ${t.price?.let(::eur) ?: "no price"} — ${t.title}")
                     t.city?.let { append(", $it") }
                     t.dealPercent?.let { append(", $it % below similar listings") }
                     append('\n')
@@ -438,8 +446,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             }
         }
         val compare = if (msg.tori.orEmpty().any { !it.similar } && msg.offers.orEmpty().any { !it.fromSnippet })
-            "\nGive the cheapest new offer and the cheapest used Tori listing separately (price, shop or city). " +
-                "Only the asked model; ignore other models." else ""
+            "\nGive the cheapest new offer and the cheapest used Tori listing separately (price, shop or city), " +
+                "each with its own source number. If the cheapest new offer is out of stock, also give the cheapest " +
+                "new one in stock. Only the asked model; ignore other models and whole computers." else ""
         val few = msg.offers.orEmpty().size in 1..2
         val note = if (few) "\nOnly ${msg.offers!!.size} offer(s) were found: say that the list is thin, " +
             "mention whether delivery or currency changes the picture, and search the web for other listings." else ""

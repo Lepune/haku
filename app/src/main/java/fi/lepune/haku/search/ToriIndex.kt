@@ -18,6 +18,8 @@ data class ToriItem(
     val sold: Boolean = false,
     /** Close in meaning but not the asked model (e.g. GTX 1660 for "RTX 3060"). */
     val similar: Boolean = false,
+    /** A whole computer that contains the asked part ("Pelikone RTX 3060 | i5…"). */
+    val inComputer: Boolean = false,
 ) {
     /** "−42 %" style discount vs similar listings, only when it's meaningfully cheaper. */
     val dealPercent: Int? get() = dealRatio?.takeIf { it in 0.0..0.85 }?.let { ((1 - it) * 100).toInt() }

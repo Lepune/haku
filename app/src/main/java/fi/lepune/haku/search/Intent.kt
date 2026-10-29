@@ -50,6 +50,15 @@ object Intent {
             }
             .distinct()
 
+    private val COMPUTER = Regex(
+        "\\b(pelikone|pelitietokone|tietokone|kone|pc|desktop|kannettava|läppäri|laptop|kokoonpano)\\b|" +
+            "\\bi[3579][- ]?\\d{4,5}|\\bryzen\\s?[3579]\\b|\\br[3579][- ]\\d{4}",
+        RegexOption.IGNORE_CASE,
+    )
+
+    /** "Pelikone RTX 3060 | i5-9600KF" is a whole computer, not the card the user asked for. */
+    fun isComputer(text: String) = COMPUTER.containsMatchIn(text)
+
     private val VARIANTS = listOf("ti", "super", "xtx", "xt", "max", "pro", "plus", "mini")
 
     /**

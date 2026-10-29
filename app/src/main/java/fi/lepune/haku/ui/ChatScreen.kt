@@ -680,13 +680,15 @@ private fun ToriCard(items: List<ToriItem>) {
     val ctx = LocalContext.current
     Column(Modifier.fillMaxWidth().padding(top = 10.dp)) {
         Text("Tori · oma indeksi", style = MaterialTheme.typography.titleSmall)
-        if (items.none { !it.similar }) {
-            Text("No listings of this exact model.", style = MaterialTheme.typography.bodySmall,
+        if (items.none { !it.similar && !it.inComputer }) {
+            Text("No listings of this exact model on its own.", style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
+        fun group(t: ToriItem) = when { t.similar -> "Samankaltaisia"; t.inComputer -> "Koneissa"; else -> "" }
         items.forEachIndexed { i, t ->
-            if (t.similar && (i == 0 || !items[i - 1].similar)) {
-                Text("Samankaltaisia", style = MaterialTheme.typography.labelMedium,
+            val g = group(t)
+            if (g.isNotEmpty() && (i == 0 || group(items[i - 1]) != g)) {
+                Text(g, style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 6.dp))
             }
             Row(
