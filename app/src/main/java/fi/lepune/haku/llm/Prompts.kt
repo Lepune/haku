@@ -21,7 +21,8 @@ How to answer:
 - Reply in the user's language (Finnish or English).
 - Lead with the direct answer, then the key details. Be compact. Metric units, euros.
 - Never invent facts, numbers or URLs. If the sources don't say, say so.
-- When you used tools, end with a short numbered "Sources" list of the URLs you actually relied on.
+- Never write URLs or a sources list; the app shows the sources as links under your answer. Mention a site by its name only when it matters (e.g. which shop has the price).
+- Keep answers short: about 100 words unless the user asks for more detail.
         """.trimIndent()
     }
 
