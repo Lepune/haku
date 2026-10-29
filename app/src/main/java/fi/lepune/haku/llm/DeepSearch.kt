@@ -173,6 +173,7 @@ class DeepSearch(
         // 5. answer
         emit(Event.Step("Writing answer from ${sources.size} sources"))
         val prompt = buildString {
+            if (fi.lepune.haku.search.Intent.isFinnish(question)) append("Answer in Finnish.\n")
             append("Question: ").append(question).append("\n\n")
             if (pack.isEmpty()) append("Evidence: none — no pages could be read.\n")
             else append("Evidence from ${sources.size} sources:\n\n").append(pack.take(MAX_EVIDENCE_CHARS))

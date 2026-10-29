@@ -46,6 +46,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -62,6 +63,8 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.mikepenz.markdown.m3.Markdown
+import fi.lepune.haku.data.Mode
+import fi.lepune.haku.search.Offer
 import fi.lepune.haku.tools.Hit
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -73,7 +76,8 @@ fun ChatScreen(
     onStop: () -> Unit,
     onNewChat: () -> Unit,
     onOpenSetup: () -> Unit,
-    onDeepChange: (Boolean) -> Unit,
+    onModeChange: (Mode) -> Unit,
+    onAskGemma: (String) -> Unit,
 ) {
     var input by rememberSaveable { mutableStateOf(initialText.orEmpty()) }
     val listState = rememberLazyListState()
@@ -115,8 +119,9 @@ fun ChatScreen(
         ) {
             Box(Modifier.weight(1f).fillMaxWidth()) {
                 when {
-                    state.engine !is EngineState.Ready -> EngineGate(state.engine, onOpenSetup)
-                    state.messages.isEmpty() -> EmptyHints(state.settings.deepSearch)
+                    state.engine !is EngineState.Ready && state.settings.mode != Mode.SEARCH &&
+                        state.messages.isEmpty() -> EngineGate(state.engine, onOpenSetup)
+                    state.messages.isEmpty() -> EmptyHints(state.settings.mode)
                     else -> LazyColumn(
                         state = listState,
                         contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
@@ -124,7 +129,8 @@ fun ChatScreen(
                         modifier = Modifier.fillMaxSize(),
                     ) {
                         items(state.messages, key = { it.id }) { msg ->
-                            if (msg.role == Role.USER) UserBubble(msg.text) else AssistantBlock(msg)
+                            if (msg.role == Role.USER) UserBubble(msg.text)
+                            else AssistantBlock(msg, canAsk = state.engine is EngineState.Ready && !state.generating, onAskGemma = onAskGemma)
                         }
                     }
                 }
@@ -132,10 +138,10 @@ fun ChatScreen(
             InputBar(
                 value = input,
                 onValueChange = { input = it },
-                enabled = state.engine is EngineState.Ready,
+                enabled = state.engine is EngineState.Ready || state.settings.mode == Mode.SEARCH,
                 generating = state.generating,
-                deep = state.settings.deepSearch,
-                onDeepChange = onDeepChange,
+                mode = state.settings.mode,
+                onModeChange = onModeChange,
                 onSend = { onSend(input); input = "" },
                 onStop = onStop,
             )
@@ -198,7 +204,7 @@ private fun EngineGate(e: EngineState, onOpenSetup: () -> Unit) {
 }
 
 @Composable
-private fun EmptyHints(deep: Boolean) {
+private fun EmptyHints(mode: Mode) {
     Column(
         Modifier.fillMaxSize().padding(24.dp),
         verticalArrangement = Arrangement.Center,
@@ -206,10 +212,14 @@ private fun EmptyHints(deep: Boolean) {
         Text("Ask anything.", style = MaterialTheme.typography.titleMedium)
         Spacer(Modifier.height(8.dp))
         Text(
-            if (deep) "Deep search is on: Haku plans several searches, reads up to 8 pages and answers " +
-                "with numbered sources. Takes 20–60 s. Best for shopping, comparisons and anything current."
-            else "Quick mode: answers directly or does a couple of searches. Switch on Deep below for " +
-                "research questions like prices across shops.",
+            when (mode) {
+                Mode.SEARCH -> "Haku: results in seconds, no AI writing. Price questions (\"halvin …\", \"hinta\") " +
+                    "give a list sorted by price; anything else gives web results. Tap \"Kysy Gemmalta\" " +
+                    "under a result for a written answer."
+                Mode.ASK -> "Kysy: Gemma answers and searches when it needs to."
+                Mode.RESEARCH -> "Tutki: Gemma plans several searches, reads up to 6 pages and writes a sourced " +
+                    "answer. Slowest, most thorough."
+            },
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -233,7 +243,7 @@ private fun UserBubble(text: String) {
 }
 
 @Composable
-private fun AssistantBlock(msg: ChatMessage) {
+private fun AssistantBlock(msg: ChatMessage, canAsk: Boolean, onAskGemma: (String) -> Unit) {
     var showSteps by remember { mutableStateOf(false) }
     Column(Modifier.fillMaxWidth()) {
         if (msg.steps.isNotEmpty()) {
@@ -252,6 +262,10 @@ private fun AssistantBlock(msg: ChatMessage) {
                 }
             }
         }
+
+        msg.offers?.let { OffersCard(it) }
+        msg.instant?.let { InstantCard(it) }
+        msg.results?.let { ResultsList(it) }
 
         if (msg.text.isNotEmpty()) {
             SelectionContainer { Markdown(content = msg.text, modifier = Modifier.fillMaxWidth()) }
@@ -273,11 +287,18 @@ private fun AssistantBlock(msg: ChatMessage) {
         }
 
         if (msg.done) {
-            val chips = msg.read.ifEmpty { msg.searched.take(3) }
-            if (chips.isNotEmpty()) SourceChips(chips)
+            if (msg.mode != Mode.SEARCH) {
+                val chips = msg.read.ifEmpty { msg.searched.take(3) }
+                if (chips.isNotEmpty()) SourceChips(chips)
+            }
             msg.stats?.let {
                 Text(it, style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.outline, modifier = Modifier.padding(top = 4.dp))
+            }
+            if (msg.mode == Mode.SEARCH && msg.question != null && canAsk) {
+                TextButton(onClick = { onAskGemma(msg.question) }, contentPadding = PaddingValues(0.dp)) {
+                    Text("Kysy Gemmalta →")
+                }
             }
         }
     }
@@ -312,8 +333,8 @@ private fun InputBar(
     onValueChange: (String) -> Unit,
     enabled: Boolean,
     generating: Boolean,
-    deep: Boolean,
-    onDeepChange: (Boolean) -> Unit,
+    mode: Mode,
+    onModeChange: (Mode) -> Unit,
     onSend: () -> Unit,
     onStop: () -> Unit,
 ) {
@@ -323,13 +344,15 @@ private fun InputBar(
             Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, top = 6.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            FilterChip(
-                selected = deep,
-                onClick = { onDeepChange(!deep) },
-                enabled = !generating,
-                label = { Text(if (deep) "Deep search" else "Quick") },
-                leadingIcon = { Icon(Icons.Default.Search, null, Modifier.size(16.dp)) },
-            )
+            Mode.entries.forEach { m ->
+                FilterChip(
+                    selected = mode == m,
+                    onClick = { onModeChange(m) },
+                    enabled = !generating,
+                    label = { Text(m.label) },
+                    modifier = Modifier.padding(end = 6.dp),
+                )
+            }
         }
         Row(
             Modifier
@@ -358,5 +381,114 @@ private fun InputBar(
             }
         }
       }
+    }
+}
+
+// ---------------------------------------------------------------------- search-mode cards
+
+@Composable
+private fun OffersCard(offers: List<Offer>) {
+    val ctx = LocalContext.current
+    var finnishOnly by remember { mutableStateOf(false) }
+    val shown = if (finnishOnly) offers.filter { it.finnish } else offers
+    Column(Modifier.fillMaxWidth()) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                if (offers.isEmpty()) "No prices found" else "Cheapest first",
+                style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f),
+            )
+            if (offers.any { it.finnish }) {
+                FilterChip(
+                    selected = finnishOnly, onClick = { finnishOnly = !finnishOnly },
+                    label = { Text("Vain FI-yritykset") },
+                )
+            }
+        }
+        if (offers.isEmpty()) {
+            Text(
+                "No shop page listed a matching product with a price. Try other words, or ask Gemma.",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        shown.forEach { o ->
+            Surface(
+                shape = RoundedCornerShape(12.dp),
+                color = MaterialTheme.colorScheme.surfaceContainerLow,
+                modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp).clickable {
+                    runCatching { ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(o.url))) }
+                },
+            ) {
+                Row(Modifier.padding(horizontal = 12.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text(o.name, style = MaterialTheme.typography.bodyMedium, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                        val meta = buildList {
+                            add(o.shop)
+                            o.via?.let { add("via $it") }
+                            when (o.inStock) { true -> add("in stock"); false -> add("out of stock"); null -> {} }
+                            if (o.fromSnippet) add("price from search snippet")
+                        }.joinToString(" · ")
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            if (o.finnish) {
+                                Surface(
+                                    shape = RoundedCornerShape(4.dp), color = MaterialTheme.colorScheme.primaryContainer,
+                                    modifier = Modifier.padding(end = 6.dp),
+                                ) { Text("FI", style = MaterialTheme.typography.labelSmall, modifier = Modifier.padding(horizontal = 4.dp)) }
+                            }
+                            Text(meta, style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        }
+                    }
+                    Spacer(Modifier.size(8.dp))
+                    Text(
+                        (if (o.from) "alk. " else "") + "%.2f €".format(o.price).replace('.', ','),
+                        style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold,
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun InstantCard(h: Hit) {
+    val ctx = LocalContext.current
+    Surface(
+        shape = RoundedCornerShape(12.dp),
+        color = MaterialTheme.colorScheme.secondaryContainer,
+        modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp).clickable {
+            runCatching { ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(h.url))) }
+        },
+    ) {
+        Column(Modifier.padding(12.dp)) {
+            Text(h.title, style = MaterialTheme.typography.titleSmall)
+            Text(h.snippet, style = MaterialTheme.typography.bodySmall, maxLines = 8, overflow = TextOverflow.Ellipsis)
+            Text("Wikipedia", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.outline)
+        }
+    }
+}
+
+@Composable
+private fun ResultsList(results: List<Hit>) {
+    val ctx = LocalContext.current
+    if (results.isEmpty()) {
+        Text("No results.", style = MaterialTheme.typography.bodySmall)
+        return
+    }
+    Column(Modifier.fillMaxWidth()) {
+        results.forEach { h ->
+            Column(
+                Modifier.fillMaxWidth().clickable {
+                    runCatching { ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(h.url))) }
+                }.padding(vertical = 6.dp)
+            ) {
+                Text(Uri.parse(h.url).host?.removePrefix("www.") ?: "", style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.outline)
+                Text(h.title, style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.primary,
+                    maxLines = 2, overflow = TextOverflow.Ellipsis)
+                if (h.snippet.isNotBlank()) {
+                    Text(h.snippet, style = MaterialTheme.typography.bodySmall, maxLines = 3, overflow = TextOverflow.Ellipsis)
+                }
+            }
+        }
     }
 }

@@ -103,7 +103,97 @@ object PageExtractor {
         return Product(name, price, currency, null)
     }
 
-    private fun priceNumber(s: String): Double? = s.replace(",", ".").filter { it.isDigit() || it == '.' }.toDoubleOrNull()
+    private fun priceNumber(s: String): Double? {
+        val t = s.trim().replace("\u00a0", "").replace(" ", "")
+        if (t.isEmpty()) return null
+        // "1.299,00" -> 1299.00 ; "1,299.00" -> 1299.00 ; "191,34" -> 191.34
+        val norm = when {
+            t.contains(',') && t.contains('.') ->
+                if (t.lastIndexOf(',') > t.lastIndexOf('.')) t.replace(".", "").replace(',', '.') else t.replace(",", "")
+            t.contains(',') -> t.replace(',', '.')
+            else -> t
+        }
+        return norm.filter { it.isDigit() || it == '.' }.toDoubleOrNull()
+    }
+
+    // ------------------------------------------------------------------ offers (shop search)
+
+    /** One concrete price for a product, with the seller when the page names it. */
+    data class RawOffer(
+        val name: String,
+        val price: Double,
+        val currency: String?,
+        val inStock: Boolean?,
+        val seller: String?,
+        val isLowest: Boolean = false,
+    )
+
+    /** Every priced offer on the page (all sellers on comparison sites, one price on shop pages). */
+    fun offers(doc: Document, max: Int = 20): List<RawOffer> {
+        val out = mutableListOf<RawOffer>()
+        for (script in doc.select("script[type=\"application/ld+json\"]")) {
+            val raw = script.data().trim()
+            if (raw.isEmpty()) continue
+            val parsed = runCatching { if (raw.startsWith("[")) JSONArray(raw) else JSONObject(raw) }.getOrNull() ?: continue
+            collectOffers(parsed, out, 0)
+            if (out.size >= max) break
+        }
+        if (out.isEmpty()) {
+            metaProduct(doc)?.let { p ->
+                priceNumber(p.price ?: "")?.let { out += RawOffer(p.name, it, p.currency, null, null) }
+            }
+        }
+        return out.distinctBy { Triple(it.name, it.price, it.seller) }.take(max)
+    }
+
+    private fun collectOffers(node: Any?, out: MutableList<RawOffer>, depth: Int) {
+        if (depth > 6 || out.size >= 30) return
+        when (node) {
+            is JSONArray -> for (i in 0 until node.length()) collectOffers(node.opt(i), out, depth + 1)
+            is JSONObject -> {
+                if (isType(node, "Product")) {
+                    val name = node.optString("name").trim()
+                    if (name.isNotEmpty()) offersOf(name, node.opt("offers"), out)
+                }
+                for (key in listOf("@graph", "itemListElement", "item", "mainEntity", "hasVariant")) {
+                    if (node.has(key)) collectOffers(node.opt(key), out, depth + 1)
+                }
+            }
+        }
+    }
+
+    private fun offersOf(name: String, offers: Any?, out: MutableList<RawOffer>) {
+        when (offers) {
+            is JSONArray -> for (i in 0 until offers.length()) offersOf(name, offers.opt(i), out)
+            is JSONObject -> {
+                val currency = offers.optString("priceCurrency").ifBlank {
+                    offers.optJSONObject("priceSpecification")?.optString("priceCurrency").orEmpty()
+                }.ifBlank { null }
+                val stock = offers.optString("availability").takeIf { it.isNotBlank() }
+                    ?.let { it.contains("InStock", true) || it.contains("LimitedAvailability", true) }
+                val seller = (offers.optJSONObject("seller")?.optString("name") ?: offers.optString("seller"))
+                    ?.trim()?.ifBlank { null }
+                val single = priceNumber(offers.optString("price").ifBlank {
+                    offers.optJSONObject("priceSpecification")?.optString("price").orEmpty()
+                })
+                if (single != null && single > 0) {
+                    out += RawOffer(name, single, currency, stock, seller)
+                } else {
+                    // AggregateOffer on comparison sites: keep the lowest, and recurse into listed offers
+                    priceNumber(offers.optString("lowPrice"))?.takeIf { it > 0 }?.let {
+                        out += RawOffer(name, it, currency, stock, seller, isLowest = true)
+                    }
+                    if (offers.has("offers")) offersOf(name, offers.opt("offers"), out)
+                }
+            }
+        }
+    }
+
+    private val Y_TUNNUS = Regex("""(y-?tunnus|business id|fo-nummer)\W{0,5}\d{7}-\d""", RegexOption.IGNORE_CASE)
+
+    /** True when the page shows a Finnish business ID — the shop is a Finnish company. */
+    fun isFinnishCompany(doc: Document): Boolean =
+        Y_TUNNUS.containsMatchIn(doc.body()?.text().orEmpty())
 
     // ------------------------------------------------------------------ text
 

@@ -9,13 +9,21 @@ enum class BackendPref(val label: String) {
     NPU("NPU (experimental)"),
 }
 
+enum class Mode(val label: String) {
+    /** Search engine replacement: price lists / results, no text generation. */
+    SEARCH("Haku"),
+    /** Gemma answers, may call search tools. */
+    ASK("Kysy"),
+    /** Multi-page research, Gemma writes a sourced answer. */
+    RESEARCH("Tutki"),
+}
+
 data class Settings(
     val modelId: String = ModelCatalog.DEFAULT.id,
     val backend: BackendPref = BackendPref.GPU,
     /** Multi-token prediction. Off by default: suspected cause of duplicated tokens (garbled numbers/words). */
     val speculativeDecoding: Boolean = false,
-    /** App-driven research: plan queries, read many pages, answer from extracted evidence. */
-    val deepSearch: Boolean = false,
+    val mode: Mode = Mode.SEARCH,
     val searxngUrl: String = "",
     val hfToken: String = "",
     val searchRegion: String = "fi-fi",
@@ -30,7 +38,7 @@ class SettingsStore(context: Context) {
         backend = runCatching { BackendPref.valueOf(prefs.getString("backend", "GPU")!!) }
             .getOrDefault(BackendPref.GPU),
         speculativeDecoding = prefs.getBoolean("speculative_v2", false),
-        deepSearch = prefs.getBoolean("deepSearch", false),
+        mode = runCatching { Mode.valueOf(prefs.getString("mode", "SEARCH")!!) }.getOrDefault(Mode.SEARCH),
         searxngUrl = prefs.getString("searxngUrl", "") ?: "",
         hfToken = prefs.getString("hfToken", "") ?: "",
         searchRegion = prefs.getString("searchRegion", "fi-fi") ?: "fi-fi",
@@ -40,7 +48,7 @@ class SettingsStore(context: Context) {
         putString("modelId", s.modelId)
         putString("backend", s.backend.name)
         putBoolean("speculative_v2", s.speculativeDecoding)
-        putBoolean("deepSearch", s.deepSearch)
+        putString("mode", s.mode.name)
         putString("searxngUrl", s.searxngUrl.trim())
         putString("hfToken", s.hfToken.trim())
         putString("searchRegion", s.searchRegion)

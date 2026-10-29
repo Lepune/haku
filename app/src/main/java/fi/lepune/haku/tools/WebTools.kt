@@ -129,6 +129,22 @@ class WebTools(private val settings: () -> Settings) {
         }
     }
 
+    /** Wikipedia lead paragraph for an instant-answer card. */
+    fun wikiSummary(lang: String, title: String): Hit? = offMain {
+        val l = normalizeLang(lang)
+        val enc = java.net.URLEncoder.encode(title.replace(' ', '_'), "UTF-8").replace("+", "%20")
+        val o = JSONObject(get("https://$l.wikipedia.org/api/rest_v1/page/summary/$enc", APP_UA))
+        if (o.optString("type") == "disambiguation") return@offMain null
+        val extract = o.optString("extract").trim()
+        if (extract.isEmpty()) null
+        else Hit(
+            o.optString("title", title),
+            o.optJSONObject("content_urls")?.optJSONObject("mobile")?.optString("page")
+                ?: "https://$l.wikipedia.org/wiki/$enc",
+            extract.take(700),
+        )
+    }
+
     // ---------------------------------------------------------------- read page
 
     fun readPage(url: String): ReadResult = offMain {

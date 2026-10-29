@@ -18,6 +18,7 @@ Every push to `main` builds a signed APK and publishes it as a GitHub release, s
 | Runtime | [LiteRT-LM](https://github.com/google-ai-edge/LiteRT-LM) Kotlin API, automatic tool calling |
 | Models | Gemma 4 E4B (default), Gemma 4 E2B (fast), Gemma 3 1B Tensor G4 NPU build (NPU test only) |
 | Accelerator | GPU (OpenCL) → CPU fallback. NPU selectable; only the G4 NPU test model targets it |
+| Modes | **Haku** (default): no AI writing — price questions give a list sorted by price from Finnish shops/price-comparison sites (schema.org offers, Y-tunnus → FI badge), other questions give web results + Wikipedia card. **Kysy**: Gemma answers with tools. **Tutki**: multi-page research with sources |
 | Tools | `webSearch` (DuckDuckGo, or your SearXNG), `wikiSearch` (fi/en Wikipedia API), `readPage` |
 | Deep search | App-driven research: Gemma writes queries → app searches, reads up to 8 pages in parallel, extracts products/prices (schema.org JSON-LD) and relevant passages → Gemma answers from that evidence with numbered sources |
 | Ranking | EmbeddingGemma 2 270M (CPU, optional download) embeds every page passage while pages are still loading; the best passages across all pages go to Gemma. Falls back to keyword scoring |

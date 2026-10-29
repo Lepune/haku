@@ -9,6 +9,7 @@ import fi.lepune.haku.data.ModelCatalog
 import fi.lepune.haku.data.ModelFileState
 import fi.lepune.haku.data.ModelManager
 import fi.lepune.haku.data.ModelSpec
+import fi.lepune.haku.data.Mode
 import fi.lepune.haku.data.Settings
 import fi.lepune.haku.data.SettingsStore
 import fi.lepune.haku.llm.DeepSearch
@@ -17,6 +18,10 @@ import fi.lepune.haku.llm.LlmEngine
 import fi.lepune.haku.llm.LoadException
 import fi.lepune.haku.llm.LoadedModel
 import fi.lepune.haku.llm.Prompts
+import fi.lepune.haku.search.Intent
+import fi.lepune.haku.search.Offer
+import fi.lepune.haku.search.QuickWeb
+import fi.lepune.haku.search.ShopSearch
 import fi.lepune.haku.tools.Hit
 import fi.lepune.haku.tools.SearchTools
 import fi.lepune.haku.tools.ToolEvent
@@ -45,7 +50,12 @@ data class ChatMessage(
     val stats: String? = null,
     val error: String? = null,
     val done: Boolean = true,
-    val deep: Boolean = false,
+    val mode: Mode = Mode.ASK,
+    /** The question this reply answers (for "ask Gemma" follow-ups). */
+    val question: String? = null,
+    val offers: List<Offer>? = null,
+    val results: List<Hit>? = null,
+    val instant: Hit? = null,
 )
 
 sealed interface EngineState {
@@ -84,6 +94,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
     private val tools = SearchTools(web) { ev -> onToolEvent(ev) }
     private val embedder = Embedder(app)
+    private val shop = ShopSearch(web)
+    private val quickWeb = QuickWeb(web)
     private val deep = DeepSearch(llm, web) {
         val spec = ModelCatalog.EMBEDDER
         if (models.state(spec) is ModelFileState.Ready) {
@@ -195,7 +207,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun setDeep(on: Boolean) = updateSettings(_state.value.settings.copy(deepSearch = on))
+    fun setMode(m: Mode) = updateSettings(_state.value.settings.copy(mode = m))
 
     fun updateSettings(new: Settings, reload: Boolean = false) {
         val old = _state.value.settings
@@ -221,17 +233,21 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun send(text: String) {
+    fun send(text: String, modeOverride: Mode? = null) {
         val q = text.trim()
         if (q.isEmpty() || _state.value.generating) return
-        if (_state.value.engine !is EngineState.Ready) return
+        val mode = modeOverride ?: _state.value.settings.mode
 
-        val spec = (_state.value.engine as EngineState.Ready).model.spec
-        val useDeep = _state.value.settings.deepSearch && spec.supportsTools
+        if (mode == Mode.SEARCH) {
+            sendSearch(q)
+            return
+        }
+        val ready = _state.value.engine as? EngineState.Ready ?: return
+        val useDeep = mode == Mode.RESEARCH && ready.model.spec.supportsTools
 
-        val user = ChatMessage(nextId++, Role.USER, q, deep = useDeep)
+        val user = ChatMessage(nextId++, Role.USER, q, mode = mode)
         val reply = ChatMessage(nextId++, Role.ASSISTANT, "", status = if (useDeep) "Planning…" else "Thinking…",
-            done = false, deep = useDeep)
+            done = false, mode = mode, question = q)
         activeId = reply.id
         _state.update { it.copy(messages = it.messages + user + reply, generating = true) }
         tools.resetBudget()
@@ -240,13 +256,14 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             sendDeep(q)
             return
         }
+        val toModel = if (Intent.isFinnish(q)) "$q\n\n(Vastaa suomeksi.)" else q
 
         genJob = viewModelScope.launch(Dispatchers.IO) {
             val start = SystemClock.elapsedRealtime()
             var firstTokenAt = 0L
             var chars = 0
             try {
-                llm.send(q).collect { chunk ->
+                llm.send(toModel).collect { chunk ->
                     val piece = chunk.toString()
                     if (piece.isEmpty()) return@collect
                     if (firstTokenAt == 0L) firstTokenAt = SystemClock.elapsedRealtime()
@@ -255,6 +272,36 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 }
                 val end = SystemClock.elapsedRealtime()
                 editActive { it.copy(done = true, status = null, stats = stats(start, firstTokenAt, end, chars)) }
+            } catch (e: CancellationException) {
+                editActive { it.copy(done = true, status = null, stats = "stopped") }
+                throw e
+            } catch (t: Throwable) {
+                editActive { it.copy(done = true, status = null, error = t.message ?: t.javaClass.simpleName) }
+            } finally {
+                activeId = -1L
+                _state.update { it.copy(generating = false) }
+            }
+        }
+    }
+
+    /** Search mode: no language model, results in a couple of seconds. */
+    private fun sendSearch(q: String) {
+        val shopping = Intent.isShopping(q)
+        val user = ChatMessage(nextId++, Role.USER, q, mode = Mode.SEARCH)
+        val reply = ChatMessage(nextId++, Role.ASSISTANT, "", status = if (shopping) "Finding prices…" else "Searching…",
+            done = false, mode = Mode.SEARCH, question = q)
+        activeId = reply.id
+        _state.update { it.copy(messages = it.messages + user + reply, generating = true) }
+
+        genJob = viewModelScope.launch(Dispatchers.IO) {
+            try {
+                if (shopping) {
+                    val r = shop.run(q) { label -> editActive { it.copy(status = label, steps = it.steps + label) } }
+                    editActive { it.copy(offers = r.offers, stats = r.summary, done = true, status = null) }
+                } else {
+                    val r = quickWeb.run(q)
+                    editActive { it.copy(results = r.results, instant = r.instant, stats = r.summary, done = true, status = null) }
+                }
             } catch (e: CancellationException) {
                 editActive { it.copy(done = true, status = null, stats = "stopped") }
                 throw e
