@@ -41,7 +41,7 @@ class WebTools(private val settings: () -> Settings) {
     // ---------------------------------------------------------------- web search
 
     fun webSearch(query: String, limit: Int = MAX_HITS): List<Hit> = offMain {
-        val searx = settings().searxngUrl.trim().trimEnd('/')
+        val searx = normalizeSearxUrl(settings().searxngUrl).orEmpty()
         // Each engine can throttle or block us; fall through to the next one instead of failing.
         val engines = buildList<() -> List<Hit>> {
             if (searx.isNotEmpty()) add { searxng(searx, query, limit) }
@@ -65,6 +65,33 @@ class WebTools(private val settings: () -> Settings) {
             val href = a.absUrl("href").ifBlank { return@mapNotNull null }
             Hit(a.text(), href, li.selectFirst("p.s, p")?.text().orEmpty().take(SNIPPET))
         }.take(limit)
+    }
+
+    /**
+     * Settings "Test" button: one real query against the instance, with a plain-language
+     * reason when it fails (the normal search silently falls back to DuckDuckGo).
+     */
+    fun testSearxng(rawUrl: String): String = offMain {
+        val base = normalizeSearxUrl(rawUrl) ?: return@offMain "Enter a URL like http://server:8080"
+        val start = System.currentTimeMillis()
+        try {
+            val n = searxng(base, "wikipedia", 10).size
+            val ms = System.currentTimeMillis() - start
+            if (n == 0) "Connected, but 0 results. Check the engines enabled in SearXNG settings."
+            else "OK: $n results in $ms ms from $base"
+        } catch (t: Throwable) {
+            val m = t.message.orEmpty()
+            when {
+                "403" in m -> "HTTP 403: enable JSON output in SearXNG settings.yml (search: formats: [html, json])."
+                "429" in m -> "HTTP 429: SearXNG's rate limiter blocks the app. Set server: limiter: false."
+                "CLEARTEXT" in m.uppercase() -> "Plain http blocked by Android. Update Haku."
+                t is java.net.UnknownHostException -> "Host not found. Use the server's IP or its Tailscale name."
+                t is java.net.SocketTimeoutException || t is java.net.ConnectException ->
+                    "No connection. Is the server on, the port right, and the phone on LAN/Tailscale?"
+                t is org.json.JSONException -> "Got a page, not JSON. Wrong URL or JSON output disabled."
+                else -> "Failed: ${m.ifBlank { t.javaClass.simpleName }}"
+            }
+        }
     }
 
     private fun searxng(base: String, query: String, limit: Int): List<Hit> {
@@ -322,6 +349,14 @@ class WebTools(private val settings: () -> Settings) {
             if (!resp.isSuccessful) throw java.io.IOException("HTTP ${resp.code} from ${resp.request.url.host}")
             return resp.body?.string().orEmpty()
         }
+    }
+
+    /** "server:8080" -> "http://server:8080"; strips a trailing "/search" or slash. */
+    private fun normalizeSearxUrl(raw: String): String? {
+        var u = raw.trim().trimEnd('/')
+        if (u.isEmpty()) return null
+        if (!u.startsWith("http://") && !u.startsWith("https://")) u = "http://$u"
+        return u.removeSuffix("/search").trimEnd('/')
     }
 
     private fun normalizeLang(lang: String) =

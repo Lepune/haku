@@ -187,7 +187,15 @@ fun SetupScreen(
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
                 modifier = Modifier.fillMaxWidth(),
             )
-            Hint("Empty = DuckDuckGo directly from the phone. Set this once your own server is up.")
+            Hint("Empty = DuckDuckGo directly from the phone. Use the Tailscale name or IP so it works away from home.")
+            var searxTest by remember { mutableStateOf<String?>(null) }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                TextButton(
+                    onClick = { searxTest = "Testing…"; vm.testSearxng(searx) { searxTest = it } },
+                    enabled = searx.isNotBlank() && searxTest != "Testing…",
+                ) { Text("Test") }
+                searxTest?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
+            }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 listOf("fi-fi" to "Finland", "wt-wt" to "Global").forEach { (code, label) ->
                     Row(

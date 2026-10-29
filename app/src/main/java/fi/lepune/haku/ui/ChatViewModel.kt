@@ -230,6 +230,14 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /** Settings "Test": one query against the SearXNG instance; [done] runs on the main thread. */
+    fun testSearxng(url: String, done: (String) -> Unit) {
+        viewModelScope.launch {
+            val r = kotlinx.coroutines.withContext(Dispatchers.IO) { runCatching { web.testSearxng(url) }.getOrElse { "Failed: ${it.message}" } }
+            done(r)
+        }
+    }
+
     fun setMode(m: Mode) = updateSettings(_state.value.settings.copy(mode = m))
 
     fun updateSettings(new: Settings, reload: Boolean = false) {

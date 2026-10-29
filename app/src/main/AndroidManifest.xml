@@ -16,7 +16,10 @@
         android:label="Haku"
         android:largeHeap="true"
         android:supportsRtl="true"
-        android:theme="@style/Theme.Haku">
+        android:theme="@style/Theme.Haku"
+        android:usesCleartextTraffic="true">
+        <!-- Plain http is needed for a self-hosted SearXNG on the LAN or Tailscale (http://host:8080).
+             Public search and page fetches still use https. -->
 
         <!-- GPU (OpenCL) backend for LiteRT-LM. libOpenCL-pixel.so is the Tensor/Mali one. -->
         <uses-native-library android:name="libOpenCL.so" android:required="false" />
