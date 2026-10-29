@@ -344,6 +344,26 @@ class WebTools(private val settings: () -> Settings) {
             .callTimeout(6, TimeUnit.SECONDS).build()
     }
 
+    // ---------------------------------------------------------------- currency
+
+    @Volatile private var rates: Pair<Long, Map<String, Double>>? = null
+
+    /**
+     * ECB reference rates (1 EUR = x CUR), cached for 12 h. Lets eBay and other foreign
+     * listings show up in euros instead of being dropped. Empty map if unreachable.
+     */
+    fun eurRates(): Map<String, Double> = offMain {
+        val now = System.currentTimeMillis()
+        rates?.takeIf { now - it.first < 12 * 3_600_000L }?.let { return@offMain it.second }
+        val xml = runCatching { get("https://www.ecb.europa.eu/stats/eurofxref/eurofxref-daily.xml") }.getOrNull()
+            ?: return@offMain rates?.second.orEmpty()
+        val map = Regex("currency=['\"]([A-Z]{3})['\"]\\s+rate=['\"]([0-9.]+)['\"]").findAll(xml)
+            .mapNotNull { m -> m.groupValues[2].toDoubleOrNull()?.let { m.groupValues[1] to it } }
+            .toMap()
+        if (map.isNotEmpty()) rates = now to map
+        map
+    }
+
     // ---------------------------------------------------------------- http
 
     private fun get(url: String, ua: String = APP_UA): String {

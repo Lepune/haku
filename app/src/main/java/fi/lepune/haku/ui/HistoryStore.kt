@@ -110,6 +110,7 @@ class HistoryStore(context: Context) {
         put("fi", o.finnish); o.via?.let { put("via", it) }
         put("from", o.from); put("snip", o.fromSnippet)
         o.shipping?.let { put("ship", it) }
+        o.fx?.let { put("fx", it) }
     }
 
     private fun offerOf(o: JSONObject) = Offer(
@@ -118,6 +119,7 @@ class HistoryStore(context: Context) {
         finnish = o.optBoolean("fi"), via = o.optString("via").ifEmpty { null },
         from = o.optBoolean("from"), fromSnippet = o.optBoolean("snip"),
         shipping = if (o.has("ship")) o.optDouble("ship") else null,
+        fx = o.optString("fx").ifEmpty { null },
     )
 
     companion object {

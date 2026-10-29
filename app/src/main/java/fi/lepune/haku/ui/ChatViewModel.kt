@@ -366,6 +366,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     append("${i + 1}. ${eur(o.price)}")
                     if (o.from) append(" (from)")
                     o.shipping?.let { append(" + delivery ${eur(it)}") }
+                    o.fx?.let { append(" (converted from $it)") }
                     append(" — ${o.name} — ${o.shop}")
                     when (o.inStock) { true -> append(", in stock"); false -> append(", out of stock"); null -> {} }
                     if (o.finnish) append(", Finnish company")
@@ -378,7 +379,10 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 r.take(8).forEachIndexed { i, h -> append("${i + 1}. ${h.title} (${h.url}) — ${h.snippet}\n") }
             }
         }
-        send(q, Mode.ASK, context = ctx.ifBlank { null })
+        val few = msg.offers.orEmpty().size in 1..2
+        val note = if (few) "\nOnly ${msg.offers!!.size} offer(s) were found: say that the list is thin, " +
+            "mention whether delivery or currency changes the picture, and search the web for other listings." else ""
+        send(q, Mode.ASK, context = (ctx + note).ifBlank { null })
     }
 
     fun send(text: String, modeOverride: Mode? = null, context: String? = null) {

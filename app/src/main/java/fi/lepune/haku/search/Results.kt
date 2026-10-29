@@ -19,6 +19,8 @@ data class Offer(
     val fromSnippet: Boolean = false,
     /** Delivery cost when the shop's product data states it. */
     val shipping: Double? = null,
+    /** Original currency when the price was converted to euros (e.g. "USD"); null = listed in EUR. */
+    val fx: String? = null,
 ) {
     val total: Double? get() = shipping?.let { price + it }
 }

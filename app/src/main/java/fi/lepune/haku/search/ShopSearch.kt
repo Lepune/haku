@@ -39,11 +39,17 @@ class ShopSearch(
     ): ShopResult {
         val t0 = SystemClock.elapsedRealtime()
         val terms = Intent.productTerms(question)
-        val wantDims = Intent.dims(question).map(::dimKey)
-        val wantStems = Intent.stems(terms)
+        val want = Want(Intent.dims(question).map(::dimKey), Intent.stems(terms), Intent.modelCodes(terms))
+        val used = Intent.isUsed(question)
 
-        // 1. searches in parallel
-        val queries = listOf(
+        // 1. searches in parallel. Used/niche hardware isn't in Finnish retail: add second-hand markets.
+        val queries = if (used) listOf(
+            "$terms käytetty",
+            "site:tori.fi $terms",
+            "site:huuto.net $terms",
+            "$terms used ebay",
+            "$terms hinta",
+        ) else listOf(
             "$terms hinta",
             "site:hinta.fi $terms",
             "site:hintaopas.fi $terms",
@@ -51,12 +57,15 @@ class ShopSearch(
         )
         step("Searching: " + queries.joinToString(" · "))
         val sem = Semaphore(3)
-        val hitLists = coroutineScope {
-            queries.map { q ->
+        val (hitLists, rates) = coroutineScope {
+            // Foreign listings (eBay in USD/GBP) are converted to euros instead of dropped.
+            val fx = async(Dispatchers.IO) { runCatching { web.eurRates() }.getOrDefault(emptyMap()) }
+            val lists = queries.map { q ->
                 async(Dispatchers.IO) {
                     sem.withPermit { runCatching { web.webSearch(q, limit = 8) }.getOrDefault(emptyList()) }
                 }
             }.awaitAll()
+            lists to fx.await()
         }
         val hits = interleave(hitLists)
             .filterNot { h -> SKIP.any { host(h.url).endsWith(it) } }
@@ -84,13 +93,13 @@ class ShopSearch(
         val tRead = SystemClock.elapsedRealtime()
         fun sec(ms: Long) = "%.1f".format(ms / 1000.0)
 
-        val first = assemble(fetched, hits, wantDims, wantStems)
+        val first = assemble(fetched, hits, want, rates)
         val baseSummary = "search ${sec(tSearch - t0)} s · read ${sec(tRead - tSearch)} s"
 
         // 3. pages that look right but gave no price: render them like a browser would
-        val pricedUrls = fetched.filter { p -> p.offers.any { matches(it.name, wantDims, wantStems) } }.map { it.hit.url }.toSet()
+        val pricedUrls = fetched.filter { p -> p.offers.any { matches(it.name, want) } }.map { it.hit.url }.toSet()
         val toRender = if (renderer == null) emptyList() else hits.filter { h ->
-            h.url !in pricedUrls && host(h.url) !in COMPARISON && matches(h.title + " " + h.snippet, wantDims, wantStems)
+            h.url !in pricedUrls && host(h.url) !in COMPARISON && matches(h.title + " " + h.snippet, want)
         }.take(MAX_RENDER)
         if (toRender.isEmpty()) {
             return ShopResult(first, "${first.size} offers from ${fetched.size} pages · $baseSummary")
@@ -113,27 +122,30 @@ class ShopSearch(
 
         val renderedUrls = rendered.map { it.hit.url }.toSet()
         val all = fetched.filterNot { it.hit.url in renderedUrls } + rendered
-        val merged = assemble(all, hits, wantDims, wantStems)
+        val merged = assemble(all, hits, want, rates)
         return ShopResult(
             merged,
             "${merged.size} offers from ${all.size} pages · $baseSummary · render ${sec(tRender - tRead)} s (${rendered.size}/${toRender.size})",
         )
     }
 
-    private fun assemble(pages: List<Page>, hits: List<Hit>, wantDims: List<String>, wantStems: Set<String>): List<Offer> {
+    private fun assemble(pages: List<Page>, hits: List<Hit>, want: Want, rates: Map<String, Double>): List<Offer> {
         val offers = mutableListOf<Offer>()
         for (p in pages) {
             val host = host(p.hit.url)
             for (o in p.offers) {
-                if (o.currency != null && !o.currency.equals("EUR", true)) continue
-                if (!matches(o.name, wantDims, wantStems)) continue
+                val cur = o.currency?.trim()?.uppercase()?.takeIf { it.isNotEmpty() && it != "EUR" }
+                // 1 EUR = rate CUR; unknown currency -> skip rather than show a wrong number.
+                val rate = if (cur == null) 1.0 else rates[cur] ?: continue
+                if (!matches(o.name, want)) continue
                 // A shop page often names itself as the seller ("Cropper" on cropper.fi) — that's not a third party.
                 val thirdParty = o.seller != null && !sameBrand(o.seller, host)
                 offers += Offer(
-                    name = o.name, price = o.price, shop = if (thirdParty) o.seller!! else host, url = p.hit.url,
+                    name = o.name, price = o.price / rate, shop = if (thirdParty) o.seller!! else host, url = p.hit.url,
                     inStock = o.inStock,
                     finnish = p.finnish && !thirdParty, // a seller listed on a comparison site: origin unknown
-                    via = if (thirdParty) host else null, from = o.isLowest, shipping = o.shipping,
+                    via = if (thirdParty) host else null, from = o.isLowest, shipping = o.shipping?.div(rate),
+                    fx = cur,
                 )
             }
         }
@@ -142,7 +154,7 @@ class ShopSearch(
         for (h in hits) {
             if (h.url in pagesWithOffers) continue
             val text = h.title + " " + h.snippet
-            if (!matches(text, wantDims, wantStems)) continue
+            if (!matches(text, want)) continue
             val price = SNIPPET_PRICE.find(text)?.groupValues?.get(1)?.let(::parseEuro) ?: continue
             offers += Offer(h.title, price, host(h.url), h.url, null, finnish = false, fromSnippet = true)
         }
@@ -156,15 +168,26 @@ class ShopSearch(
 
     // ------------------------------------------------------------------ matching
 
-    private fun matches(name: String, wantDims: List<String>, wantStems: Set<String>): Boolean {
-        if (wantDims.isNotEmpty()) {
+    private data class Want(val dims: List<String>, val stems: Set<String>, val codes: List<String>)
+
+    private fun matches(name: String, want: Want): Boolean {
+        if (want.dims.isNotEmpty()) {
             val have = Intent.dims(name).map(::dimKey).toSet()
-            if (!wantDims.all { it in have }) return false
+            if (!want.dims.all { it in have }) return false
             return true // exact dimensions are a strong enough match (names are often in English)
         }
-        val nonDimStems = wantStems.filter { s -> s.none { it.isDigit() } }
-        if (nonDimStems.isEmpty()) return true
+        val nonDimStems = want.stems.filter { s -> s.none { it.isDigit() } }
         val haveStems = Intent.stems(name)
+        if (want.codes.isNotEmpty()) {
+            // A model code ("mi100", "rtx5070") identifies the product; every one must be in the
+            // name ("AMD Instinct MI-100 32GB" matches). Other words only need a loose overlap,
+            // since listings rarely repeat "card" or "graphics".
+            val c = Intent.compact(name)
+            if (!want.codes.all { it in c }) return false
+            val need = nonDimStems.size / 3
+            return nonDimStems.count { s -> haveStems.any { it.startsWith(s.take(4)) || s.startsWith(it.take(4)) } } >= need
+        }
+        if (nonDimStems.isEmpty()) return true
         val need = ceil(nonDimStems.size / 2.0).toInt()
         return nonDimStems.count { s -> haveStems.any { it.startsWith(s.take(4)) || s.startsWith(it.take(4)) } } >= need
     }

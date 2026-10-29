@@ -588,6 +588,7 @@ private fun OffersCard(offers: List<Offer>) {
                         val meta = buildList {
                             add(o.shop)
                             o.via?.let { add("via $it") }
+                            o.fx?.let { add("from $it") }
                             when (o.inStock) { true -> add("in stock"); false -> add("out of stock"); null -> {} }
                             o.shipping?.let { add(if (it == 0.0) "free delivery" else "delivery " + euro(it)) }
                             if (o.fromSnippet) add("price from search snippet")
@@ -606,7 +607,7 @@ private fun OffersCard(offers: List<Offer>) {
                     Spacer(Modifier.size(8.dp))
                     Column(horizontalAlignment = Alignment.End) {
                         Text(
-                            (if (o.from) "alk. " else "") + euro(o.price),
+                            (if (o.from) "alk. " else "") + (if (o.fx != null) "≈ " else "") + euro(o.price),
                             style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold,
                         )
                         o.total?.takeIf { o.shipping != 0.0 }?.let {

@@ -22,7 +22,36 @@ object Intent {
         // English
         "where", "can", "i", "buy", "get", "the", "a", "an", "in", "of", "for", "to", "from", "is", "what", "whats",
         "cheapest", "cheap", "price", "prices", "best", "finland", "online", "shop", "store", "how", "much", "does",
+        // condition words: they describe the listing, not the product, so they must not decide matching
+        "used", "working", "but", "second", "hand", "secondhand", "refurbished", "condition", "new", "and", "with",
+        "käytetty", "käytettynä", "kaytetty", "toimiva", "toimivana", "kunnossa", "uusi", "uutena", "mutta",
     )
+
+    private val USED = Regex(
+        "\\b(used|second[- ]?hand|pre-?owned|refurb\\w*|käytet\\w*|kaytet\\w*|tori|huuto)\\b",
+        RegexOption.IGNORE_CASE,
+    )
+
+    private val YEAR = Regex("(19|20)\\d\\d")
+
+    /** "used MI100", "käytetty näytönohjain": look at second-hand markets too. */
+    fun isUsed(q: String) = USED.containsMatchIn(q)
+
+    /**
+     * Model codes like "MI100", "RTX 5070", "9800X3D": letters+digits, or a 3–5 digit number.
+     * Returned lowercase without separators; a listing must contain every one of them.
+     */
+    fun modelCodes(q: String): List<String> =
+        q.lowercase().split(Regex("[^\\p{L}\\p{N}]+"))
+            .filter { t ->
+                t.length >= 3 && t.any(Char::isDigit) && dims(t).isEmpty() &&
+                    (t.any(Char::isLetter) || t.length in 3..5) &&
+                    !YEAR.matches(t) // "best phone 2026" is not a model number
+            }
+            .distinct()
+
+    /** Lowercase, letters and digits only: "MI-100" and "MI 100" both become "mi100". */
+    fun compact(s: String) = s.lowercase().filter { it.isLetterOrDigit() }
 
     private val DIM = Regex("""(\d+(?:[.,]\d+)?)\s*[x×*]\s*(\d+(?:[.,]\d+)?)(?:\s*[x×*]\s*(\d+(?:[.,]\d+)?))?""")
 
