@@ -355,8 +355,11 @@ private fun AssistantBlock(
 
         msg.offers?.let { OffersCard(it) }
         msg.site?.let { SiteCard(it) }
-        msg.instant?.let { InstantCard(it) }
-        msg.results?.let { r -> ResultsList(if (msg.site != null) r.filterNot { it.url == msg.site.url } else r) }
+        msg.instant?.let { InstantCard(it, compact = msg.site != null) }
+        msg.results?.let { r ->
+            val rest = if (msg.site != null) r.filterNot { it.url == msg.site.url } else r
+            if (rest.isNotEmpty() || msg.site == null) ResultsList(rest)
+        }
 
         if (msg.text.isNotEmpty()) {
             SelectionContainer { Markdown(content = msg.text, modifier = Modifier.fillMaxWidth()) }
@@ -584,7 +587,7 @@ private fun OffersCard(offers: List<Offer>) {
 }
 
 @Composable
-private fun InstantCard(h: Hit) {
+private fun InstantCard(h: Hit, compact: Boolean = false) {
     val ctx = LocalContext.current
     Surface(
         shape = RoundedCornerShape(12.dp),
@@ -595,7 +598,8 @@ private fun InstantCard(h: Hit) {
     ) {
         Column(Modifier.padding(12.dp)) {
             Text(h.title, style = MaterialTheme.typography.titleSmall)
-            Text(h.snippet, style = MaterialTheme.typography.bodySmall, maxLines = 8, overflow = TextOverflow.Ellipsis)
+            Text(h.snippet, style = MaterialTheme.typography.bodySmall, maxLines = if (compact) 3 else 8,
+                overflow = TextOverflow.Ellipsis)
             Text("Wikipedia", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.outline)
         }
     }

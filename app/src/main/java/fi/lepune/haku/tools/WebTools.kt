@@ -39,8 +39,29 @@ class WebTools(private val settings: () -> Settings) {
 
     fun webSearch(query: String, limit: Int = MAX_HITS): List<Hit> = offMain {
         val searx = settings().searxngUrl.trim().trimEnd('/')
-        if (searx.isNotEmpty()) searxng(searx, query, limit)
-        else duckDuckGo(query, limit).ifEmpty { duckDuckGoLite(query, limit) }
+        // Each engine can throttle or block us; fall through to the next one instead of failing.
+        val engines = buildList<() -> List<Hit>> {
+            if (searx.isNotEmpty()) add { searxng(searx, query, limit) }
+            add { duckDuckGo(query, limit) }
+            add { duckDuckGoLite(query, limit) }
+            add { mojeek(query, limit) }
+        }
+        for (e in engines) {
+            val r = runCatching { e() }.getOrDefault(emptyList())
+            if (r.isNotEmpty()) return@offMain r
+        }
+        emptyList()
+    }
+
+    /** Mojeek: independent index with a plain HTML results page; used when DuckDuckGo throttles. */
+    private fun mojeek(query: String, limit: Int): List<Hit> {
+        val url = "https://www.mojeek.com/search".toHttpUrl().newBuilder().addQueryParameter("q", query).build()
+        val doc = Jsoup.parse(get(url.toString(), BROWSER_UA), url.toString())
+        return doc.select("ul.results-standard > li, ul.results > li").mapNotNull { li ->
+            val a = li.selectFirst("a.title, h2 a") ?: return@mapNotNull null
+            val href = a.absUrl("href").ifBlank { return@mapNotNull null }
+            Hit(a.text(), href, li.selectFirst("p.s, p")?.text().orEmpty().take(SNIPPET))
+        }.take(limit)
     }
 
     private fun searxng(base: String, query: String, limit: Int): List<Hit> {
@@ -143,6 +164,42 @@ class WebTools(private val settings: () -> Settings) {
                 ?: "https://$l.wikipedia.org/wiki/$enc",
             extract.take(700),
         )
+    }
+
+    /** Official website from Wikidata (P856) for a Wikipedia article title. */
+    fun officialSite(lang: String, title: String): String? = offMain {
+        val l = normalizeLang(lang)
+        val enc = java.net.URLEncoder.encode(title.replace(' ', '_'), "UTF-8").replace("+", "%20")
+        val qid = JSONObject(get("https://$l.wikipedia.org/api/rest_v1/page/summary/$enc", APP_UA))
+            .optString("wikibase_item").ifBlank { return@offMain null }
+        val claims = JSONObject(get(
+            "https://www.wikidata.org/w/api.php?action=wbgetclaims&entity=$qid&property=P856&format=json", APP_UA,
+        )).optJSONObject("claims")?.optJSONArray("P856") ?: return@offMain null
+        // Prefer a claim marked preferred, otherwise the first one.
+        val pick = (0 until claims.length()).map { claims.getJSONObject(it) }
+            .sortedByDescending { it.optString("rank") == "preferred" }
+            .firstOrNull() ?: return@offMain null
+        pick.optJSONObject("mainsnak")?.optJSONObject("datavalue")?.optString("value")?.ifBlank { null }
+    }
+
+    /** "runescape" -> try runescape.com / .fi directly; returns the first that answers with a page. */
+    fun guessDomain(compact: String): Hit? = offMain {
+        val fast = client.newBuilder().callTimeout(3, TimeUnit.SECONDS).build()
+        for (tld in listOf("com", "fi")) {
+            val url = "https://$compact.$tld/"
+            val ok = runCatching {
+                fast.newCall(Request.Builder().url(url).header("User-Agent", BROWSER_UA).build()).execute().use { r ->
+                    if (!r.isSuccessful) return@use null
+                    val finalHost = r.request.url.host.removePrefix("www.")
+                    // Accept if we stayed on a domain that still carries the name (not a parking page elsewhere).
+                    if (!finalHost.replace(".", "").contains(compact)) return@use null
+                    val title = Jsoup.parse(r.body?.string().orEmpty().take(200_000)).title()
+                    Hit(title.ifBlank { finalHost }, r.request.url.toString(), "")
+                }
+            }.getOrNull()
+            if (ok != null) return@offMain ok
+        }
+        null
     }
 
     // ---------------------------------------------------------------- read page
