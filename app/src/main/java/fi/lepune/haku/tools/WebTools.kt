@@ -85,7 +85,11 @@ class WebTools(private val settings: () -> Settings) {
                 "403" in m -> "HTTP 403: enable JSON output in SearXNG settings.yml (search: formats: [html, json])."
                 "429" in m -> "HTTP 429: SearXNG's rate limiter blocks the app. Set server: limiter: false."
                 "CLEARTEXT" in m.uppercase() -> "Plain http blocked by Android. Update Haku."
-                t is java.net.UnknownHostException -> "Host not found. Use the server's IP or its Tailscale name."
+                t is javax.net.ssl.SSLException || "CertPath" in m || "trust anchor" in m ->
+                    "Certificate not trusted. Install the server's root CA on the phone (only *.lan, " +
+                        "*.home.arpa and *.internal names accept it), or use an http:// address."
+                t is java.net.UnknownHostException -> "Host not found. Is the phone using your Pi-hole/Tailscale DNS? " +
+                    "Android Private DNS bypasses it; otherwise use the server's IP."
                 t is java.net.SocketTimeoutException || t is java.net.ConnectException ->
                     "No connection. Is the server on, the port right, and the phone on LAN/Tailscale?"
                 t is org.json.JSONException -> "Got a page, not JSON. Wrong URL or JSON output disabled."
