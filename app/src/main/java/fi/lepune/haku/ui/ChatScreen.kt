@@ -73,6 +73,7 @@ import androidx.compose.ui.unit.dp
 import com.mikepenz.markdown.m3.Markdown
 import fi.lepune.haku.data.Mode
 import fi.lepune.haku.search.Offer
+import fi.lepune.haku.search.ToriItem
 import fi.lepune.haku.tools.Hit
 import fi.lepune.haku.tools.SearchTools
 
@@ -102,7 +103,7 @@ fun ChatScreen(
         ) notifPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
         onWatch(id)
     }
-    val watched = state.watches.map { it.query.lowercase() }.toSet()
+    val watched = (state.watches.map { it.query.lowercase() } + state.hunts.map { it.question.lowercase() }).toSet()
     var input by rememberSaveable { mutableStateOf("") }
     val focus = remember { FocusRequester() }
     val keyboard = LocalSoftwareKeyboardController.current
@@ -355,6 +356,7 @@ private fun AssistantBlock(
         }
 
         msg.offers?.let { OffersCard(it) }
+        msg.tori?.takeIf { it.isNotEmpty() }?.let { ToriCard(it) }
         msg.site?.let { SiteCard(it) }
         msg.instant?.let { InstantCard(it, compact = msg.site != null) }
         msg.results?.let { r ->
@@ -395,10 +397,16 @@ private fun AssistantBlock(
                     Modifier.horizontalScroll(rememberScrollState()).padding(top = 4.dp),
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
-                    if (!msg.offers.isNullOrEmpty()) {
+                    if (!msg.offers.isNullOrEmpty() || msg.tori != null) {
                         AssistChip(
                             onClick = { if (!watched) onWatch(msg.id) },
-                            label = { Text(if (watched) "Seurataan ✓" else "Seuraa hintaa") },
+                            label = {
+                                Text(when {
+                                    watched -> "Seurataan ✓"
+                                    msg.tori != null -> "Seuraa (+ Tori)"
+                                    else -> "Seuraa hintaa"
+                                })
+                            },
                         )
                     }
                     if (msg.discussions == null) {
@@ -660,6 +668,43 @@ private fun ResultsList(results: List<Hit>) {
                     maxLines = 2, overflow = TextOverflow.Ellipsis)
                 if (h.snippet.isNotBlank()) {
                     Text(h.snippet, style = MaterialTheme.typography.bodySmall, maxLines = 3, overflow = TextOverflow.Ellipsis)
+                }
+            }
+        }
+    }
+}
+
+/** Second-hand listings from the user's own Tori index, best match first. */
+@Composable
+private fun ToriCard(items: List<ToriItem>) {
+    val ctx = LocalContext.current
+    Column(Modifier.fillMaxWidth().padding(top = 10.dp)) {
+        Text("Tori · oma indeksi", style = MaterialTheme.typography.titleSmall)
+        items.forEach { t ->
+            Row(
+                Modifier.fillMaxWidth().clickable {
+                    runCatching { ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(t.url))) }
+                }.padding(vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text(t.title, style = MaterialTheme.typography.bodyMedium, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    val meta = listOfNotNull(t.city, t.publishedAt?.take(10)).joinToString(" · ")
+                    if (meta.isNotEmpty()) {
+                        Text(meta, style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
+                    }
+                }
+                Spacer(Modifier.size(8.dp))
+                Column(horizontalAlignment = Alignment.End) {
+                    Text(t.price?.let(::euro) ?: "–", style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold)
+                    t.dealPercent?.let {
+                        Surface(shape = RoundedCornerShape(4.dp), color = MaterialTheme.colorScheme.tertiaryContainer) {
+                            Text("−$it % vs similar", style = MaterialTheme.typography.labelSmall,
+                                modifier = Modifier.padding(horizontal = 4.dp))
+                        }
+                    }
                 }
             }
         }

@@ -27,6 +27,8 @@ data class Settings(
     val searxngUrl: String = "",
     val hfToken: String = "",
     val searchRegion: String = "fi-fi",
+    /** Self-hosted Tori listing index (optional), e.g. https://tori.home.lan */
+    val toriUrl: String = "",
 )
 
 class SettingsStore(context: Context) {
@@ -42,6 +44,7 @@ class SettingsStore(context: Context) {
         searxngUrl = prefs.getString("searxngUrl", "") ?: "",
         hfToken = prefs.getString("hfToken", "") ?: "",
         searchRegion = prefs.getString("searchRegion", "fi-fi") ?: "fi-fi",
+        toriUrl = prefs.getString("toriUrl", "") ?: "",
     )
 
     fun save(s: Settings) = prefs.edit {
@@ -52,6 +55,7 @@ class SettingsStore(context: Context) {
         putString("searxngUrl", s.searxngUrl.trim())
         putString("hfToken", s.hfToken.trim())
         putString("searchRegion", s.searchRegion)
+        putString("toriUrl", s.toriUrl.trim())
     }
 
     fun downloadId(modelId: String): Long = prefs.getLong("dl_$modelId", -1L)

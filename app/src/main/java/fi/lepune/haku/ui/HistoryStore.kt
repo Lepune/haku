@@ -3,6 +3,7 @@ package fi.lepune.haku.ui
 import android.content.Context
 import fi.lepune.haku.data.Mode
 import fi.lepune.haku.search.Offer
+import fi.lepune.haku.search.ToriItem
 import fi.lepune.haku.tools.Hit
 import org.json.JSONArray
 import org.json.JSONObject
@@ -77,6 +78,7 @@ class HistoryStore(context: Context) {
         m.discussions?.let { put("disc", hits(it)) }
         m.site?.let { put("site", hit(it)) }
         m.offers?.let { put("offers", JSONArray().apply { it.forEach { o -> put(offer(o)) } }) }
+        m.tori?.let { put("tori", JSONArray().apply { it.forEach { t -> put(toriJson(t)) } }) }
     }
 
     private fun msg(o: JSONObject) = ChatMessage(
@@ -96,6 +98,7 @@ class HistoryStore(context: Context) {
         discussions = o.optJSONArray("disc")?.let(::hitsOf),
         site = o.optJSONObject("site")?.let(::hitOf),
         offers = o.optJSONArray("offers")?.let { a -> (0 until a.length()).map { offerOf(a.getJSONObject(it)) } },
+        tori = o.optJSONArray("tori")?.let { a -> (0 until a.length()).map { toriOf(a.getJSONObject(it)) } },
         done = true,
     )
 
@@ -103,6 +106,20 @@ class HistoryStore(context: Context) {
     private fun hitOf(o: JSONObject) = Hit(o.optString("t"), o.optString("u"), o.optString("s"))
     private fun hits(l: List<Hit>) = JSONArray().apply { l.forEach { put(hit(it)) } }
     private fun hitsOf(a: JSONArray) = (0 until a.length()).map { hitOf(a.getJSONObject(it)) }
+
+    private fun toriJson(t: ToriItem) = JSONObject().apply {
+        put("id", t.id); put("t", t.title); put("u", t.url)
+        t.price?.let { put("p", it) }; t.city?.let { put("c", it) }
+        t.publishedAt?.let { put("d", it) }; t.dealRatio?.let { put("r", it) }
+    }
+
+    private fun toriOf(o: JSONObject) = ToriItem(
+        id = o.optString("id"), title = o.optString("t"), url = o.optString("u"),
+        price = if (o.has("p")) o.optDouble("p") else null,
+        city = o.optString("c").ifEmpty { null },
+        publishedAt = o.optString("d").ifEmpty { null },
+        dealRatio = if (o.has("r")) o.optDouble("r") else null,
+    )
 
     private fun offer(o: Offer) = JSONObject().apply {
         put("n", o.name); put("p", o.price); put("shop", o.shop); put("u", o.url)

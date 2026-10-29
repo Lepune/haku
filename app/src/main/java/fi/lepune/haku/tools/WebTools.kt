@@ -5,6 +5,8 @@ import fi.lepune.haku.data.Settings
 import okhttp3.FormBody
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONObject
@@ -365,6 +367,19 @@ class WebTools(private val settings: () -> Settings) {
     }
 
     // ---------------------------------------------------------------- http
+
+    /** Plain GET returning the body; throws with the HTTP status on failure. */
+    fun httpGet(url: String): String = offMain { get(url) }
+
+    /** POST a JSON body, return the response body. */
+    fun httpPostJson(url: String, json: String): String = offMain {
+        val body = json.toRequestBody("application/json; charset=utf-8".toMediaType())
+        val req = Request.Builder().url(url).post(body).header("User-Agent", APP_UA).build()
+        client.newCall(req).execute().use { resp ->
+            if (!resp.isSuccessful) throw java.io.IOException("HTTP ${resp.code} from ${resp.request.url.host}")
+            resp.body?.string().orEmpty()
+        }
+    }
 
     private fun get(url: String, ua: String = APP_UA): String {
         val req = Request.Builder().url(url).header("User-Agent", ua)

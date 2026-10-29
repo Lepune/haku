@@ -26,6 +26,11 @@ import fi.lepune.haku.tools.Hit
 import fi.lepune.haku.tools.PageRenderer
 import fi.lepune.haku.alerts.PriceWatches
 import fi.lepune.haku.alerts.Watch
+import fi.lepune.haku.alerts.Hunt
+import fi.lepune.haku.alerts.ToriHunts
+import fi.lepune.haku.search.ToriIndex
+import fi.lepune.haku.search.ToriItem
+import kotlinx.coroutines.async
 import fi.lepune.haku.tools.SearchTools
 import fi.lepune.haku.tools.ToolEvent
 import fi.lepune.haku.tools.WebTools
@@ -59,6 +64,8 @@ data class ChatMessage(
     /** The question this reply answers (for "ask Gemma" follow-ups). */
     val question: String? = null,
     val offers: List<Offer>? = null,
+    /** Second-hand listings from the self-hosted Tori index (Haku mode, price questions). */
+    val tori: List<ToriItem>? = null,
     val results: List<Hit>? = null,
     val instant: Hit? = null,
     val discussions: List<Hit>? = null,
@@ -85,6 +92,7 @@ data class UiState(
     val privateCopies: Set<String> = emptySet(),
     val recent: List<Conversation> = emptyList(),
     val watches: List<Watch> = emptyList(),
+    val hunts: List<Hunt> = emptyList(),
 )
 
 class ChatViewModel(app: Application) : AndroidViewModel(app) {
@@ -100,6 +108,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     private var nextId = 1L
     private val history = HistoryStore(app)
     private val watchStore = PriceWatches(app)
+    private val huntStore = ToriHunts(app)
+    private val tori = ToriIndex(web) { _state.value.settings.toriUrl }
     /** History id of the conversation on screen; null = home screen / not yet saved. */
     private var currentConvId: Long? = null
 
@@ -123,8 +133,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     init {
         // Free the space of models the app no longer offers (e.g. the 3.7 GB E4B).
         viewModelScope.launch(Dispatchers.IO) { ModelCatalog.RETIRED.forEach { runCatching { models.delete(it) } } }
-        _state.update { it.copy(recent = history.list(), watches = watchStore.list()) }
+        _state.update { it.copy(recent = history.list(), watches = watchStore.list(), hunts = huntStore.list()) }
         watchStore.schedule()
+        huntStore.schedule()
         refreshFiles()
         viewModelScope.launch {
             // Poll download progress; cheap and keeps the models screen live.
@@ -306,14 +317,41 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         _state.update { it.copy(recent = emptyList()) }
     }
 
-    /** Start watching the price search behind [msgId]; baseline = today's cheapest real offer. */
+    /**
+     * Start watching the price search behind [msgId]; baseline = today's cheapest real offer.
+     * With a Tori index configured, also saves a hunt there so new second-hand listings notify.
+     */
     fun watchPrice(msgId: Long) {
         val msg = _state.value.messages.firstOrNull { it.id == msgId } ?: return
         val q = msg.question ?: return
         val best = msg.offers.orEmpty().filterNot { it.fromSnippet || it.from }.minByOrNull { it.price }
-            ?: msg.offers.orEmpty().minByOrNull { it.price } ?: return
-        watchStore.upsert(Watch(System.currentTimeMillis(), q, best.price, best.shop, best.url, System.currentTimeMillis()))
-        _state.update { it.copy(watches = watchStore.list()) }
+            ?: msg.offers.orEmpty().minByOrNull { it.price }
+        if (best != null) {
+            watchStore.upsert(Watch(System.currentTimeMillis(), q, best.price, best.shop, best.url, System.currentTimeMillis()))
+            _state.update { it.copy(watches = watchStore.list()) }
+        }
+        if (tori.enabled && msg.tori != null) {
+            viewModelScope.launch(Dispatchers.IO) {
+                val terms = Intent.productTerms(q)
+                runCatching { tori.createHunt(terms) }
+                    .onSuccess { id ->
+                        huntStore.add(Hunt(id, terms, q, System.currentTimeMillis()))
+                        _state.update { it.copy(hunts = huntStore.list()) }
+                    }
+                    .onFailure { e -> editMsg(msgId) { it.copy(error = "Tori hunt failed: ${e.message}") } }
+            }
+        }
+    }
+
+    fun deleteHunt(id: Long) {
+        huntStore.delete(id)
+        _state.update { it.copy(hunts = huntStore.list()) }
+    }
+
+    fun testTori(url: String, done: (String) -> Unit) {
+        viewModelScope.launch {
+            done(kotlinx.coroutines.withContext(Dispatchers.IO) { tori.test(url) })
+        }
     }
 
     fun deleteWatch(id: Long) {
@@ -370,6 +408,15 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     append(" — ${o.name} — ${o.shop}")
                     when (o.inStock) { true -> append(", in stock"); false -> append(", out of stock"); null -> {} }
                     if (o.finnish) append(", Finnish company")
+                    append('\n')
+                }
+            }
+            msg.tori?.takeIf { it.isNotEmpty() }?.let { items ->
+                append("Second-hand listings on Tori (own index):\n")
+                items.forEachIndexed { i, t ->
+                    append("${i + 1}. ${t.price?.let(::eur) ?: "no price"} — ${t.title}")
+                    t.city?.let { append(", $it") }
+                    t.dealPercent?.let { append(", $it % below similar listings") }
                     append('\n')
                 }
             }
@@ -455,7 +502,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Search mode: no language model, results in a couple of seconds. */
     private fun sendSearch(q: String) {
-        val shopping = Intent.isShopping(q)
+        val shopping = Intent.isShopping(q) || Intent.isUsed(q)
         val user = ChatMessage(nextId++, Role.USER, q, mode = Mode.SEARCH)
         val reply = ChatMessage(nextId++, Role.ASSISTANT, "", status = if (shopping) "Finding prices…" else "Searching…",
             done = false, mode = Mode.SEARCH, question = q)
@@ -465,11 +512,20 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         genJob = viewModelScope.launch(Dispatchers.IO) {
             try {
                 if (shopping) {
+                    // Own Tori index in parallel: fast, shown as soon as it answers.
+                    val replyId = reply.id
+                    val toriD = if (!tori.enabled) null else async {
+                        runCatching { tori.search(Intent.productTerms(q)) }
+                            .onFailure { e -> editMsg(replyId) { m -> m.copy(steps = m.steps + "⚠ Tori index: ${e.message}") } }
+                            .getOrNull()
+                            ?.also { items -> editMsg(replyId) { m -> m.copy(tori = items) } }
+                    }
                     val r = shop.run(
                         q,
                         step = { label -> editActive { it.copy(status = label, steps = it.steps + label) } },
                         partial = { p -> editActive { it.copy(offers = p.offers, stats = p.summary) } },
                     )
+                    toriD?.await()
                     editActive { it.copy(offers = r.offers, stats = r.summary, done = true, status = null) }
                 } else {
                     val r = quickWeb.run(q)
@@ -548,6 +604,11 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             }
             is ToolEvent.Sources -> editActive { it.copy(sources = ev.all) }
         }
+    }
+
+    /** Edit a message by id (for results that arrive independently of the active reply). */
+    private inline fun editMsg(id: Long, crossinline f: (ChatMessage) -> ChatMessage) {
+        _state.update { s -> s.copy(messages = s.messages.map { if (it.id == id) f(it) else it }) }
     }
 
     private inline fun editActive(crossinline f: (ChatMessage) -> ChatMessage) {

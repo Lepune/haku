@@ -166,6 +166,17 @@ fun SetupScreen(
                 OutlinedButton(onClick = vm::checkWatchesNow) { Text("Check now") }
             }
 
+            if (state.hunts.isNotEmpty()) {
+                SectionTitle("Tori hunts")
+                Hint("Checked hourly; new matching listings arrive as notifications.")
+                state.hunts.forEach { h ->
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(h.query, maxLines = 1, modifier = Modifier.weight(1f))
+                        TextButton(onClick = { vm.deleteHunt(h.id) }) { Text("Remove") }
+                    }
+                }
+            }
+
             HorizontalDivider()
             SectionTitle("History")
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -210,6 +221,27 @@ fun SetupScreen(
                 }
             }
 
+            var toriUrl by remember(state.settings.toriUrl) { mutableStateOf(state.settings.toriUrl) }
+            OutlinedTextField(
+                value = toriUrl,
+                onValueChange = { toriUrl = it },
+                label = { Text("Tori index URL (optional)") },
+                placeholder = { Text("https://tori.home.lan") },
+                singleLine = true,
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Hint("Your own server that indexes Tori.fi listings. Price questions then also show matching " +
+                "second-hand listings, and \"Seuraa\" saves a hunt that notifies about new ones.")
+            var toriTest by remember { mutableStateOf<String?>(null) }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                TextButton(
+                    onClick = { toriTest = "Testing…"; vm.testTori(toriUrl) { toriTest = it } },
+                    enabled = toriUrl.isNotBlank() && toriTest != "Testing…",
+                ) { Text("Test") }
+                toriTest?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
+            }
+
             var token by remember(state.settings.hfToken) { mutableStateOf(state.settings.hfToken) }
             OutlinedTextField(
                 value = token,
@@ -220,8 +252,9 @@ fun SetupScreen(
                 modifier = Modifier.fillMaxWidth(),
             )
             Button(
-                onClick = { vm.updateSettings(state.settings.copy(searxngUrl = searx, hfToken = token)) },
-                enabled = searx != state.settings.searxngUrl || token != state.settings.hfToken,
+                onClick = { vm.updateSettings(state.settings.copy(searxngUrl = searx, hfToken = token, toriUrl = toriUrl)) },
+                enabled = searx != state.settings.searxngUrl || token != state.settings.hfToken ||
+                    toriUrl != state.settings.toriUrl,
             ) { Text("Save") }
 
             Spacer(Modifier.height(24.dp))
