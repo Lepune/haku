@@ -77,11 +77,13 @@ class ShopSearch(private val web: WebTools) {
             for (o in p.offers) {
                 if (o.currency != null && !o.currency.equals("EUR", true)) continue
                 if (!matches(o.name, wantDims, wantStems)) continue
-                val shop = o.seller?.takeIf { !it.equals(host, true) } ?: host
+                // A shop page often names itself as the seller ("Cropper" on cropper.fi) — that's not a third party.
+                val thirdParty = o.seller != null && !sameBrand(o.seller, host)
                 offers += Offer(
-                    name = o.name, price = o.price, shop = shop, url = p.hit.url, inStock = o.inStock,
-                    finnish = p.finnish && o.seller == null, // seller on a comparison site: unknown origin
-                    via = if (o.seller != null) host else null, from = o.isLowest,
+                    name = o.name, price = o.price, shop = if (thirdParty) o.seller!! else host, url = p.hit.url,
+                    inStock = o.inStock,
+                    finnish = p.finnish && !thirdParty, // a seller listed on a comparison site: origin unknown
+                    via = if (thirdParty) host else null, from = o.isLowest,
                 )
             }
         }
@@ -97,7 +99,8 @@ class ShopSearch(private val web: WebTools) {
 
         val sorted = offers
             .filter { it.price in 1.0..1_000_000.0 }
-            .distinctBy { it.shop.lowercase() + "|" + "%.2f".format(it.price) }
+            .sortedByDescending { it.finnish } // keep the FI-badged copy when deduplicating
+            .distinctBy { brand(it.shop) + "|" + "%.2f".format(it.price) + "|" + brand(it.name).take(30) }
             .sortedBy { it.price }
             .take(MAX_ROWS)
 
@@ -124,6 +127,16 @@ class ShopSearch(private val web: WebTools) {
 
     /** Order-independent key so "120x120x200" matches "200x120x120". */
     private fun dimKey(d: String) = d.split('x').mapNotNull { it.toDoubleOrNull() }.sorted().joinToString("x")
+
+    /** "Cropper", "cropper.fi", "www.Cropper.com" -> "cropper" */
+    private fun brand(s: String) = s.lowercase().removePrefix("www.")
+        .substringBefore('.').filter { it.isLetterOrDigit() }
+
+    private fun sameBrand(seller: String, host: String): Boolean {
+        val a = brand(seller.replace(" ", ""))
+        val b = brand(host)
+        return a.isNotEmpty() && (a == b || a.startsWith(b) || b.startsWith(a))
+    }
 
     private fun interleave(lists: List<List<Hit>>): List<Hit> {
         val out = mutableListOf<Hit>()
