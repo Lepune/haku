@@ -237,7 +237,7 @@ private fun EngineGate(e: EngineState, onOpenSetup: () -> Unit) {
                 Spacer(Modifier.height(16.dp))
                 Text("Download a model to start", style = MaterialTheme.typography.titleMedium)
                 Text(
-                    "Gemma 4 E4B is ~3.7 GB, one-time. Everything runs on the phone.",
+                    "Gemma 4 E2B is ~2.6 GB, one-time. Everything runs on the phone.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )

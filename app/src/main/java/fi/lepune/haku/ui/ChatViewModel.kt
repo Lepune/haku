@@ -121,6 +121,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     init {
+        // Free the space of models the app no longer offers (e.g. the 3.7 GB E4B).
+        viewModelScope.launch(Dispatchers.IO) { ModelCatalog.RETIRED.forEach { runCatching { models.delete(it) } } }
         _state.update { it.copy(recent = history.list(), watches = watchStore.list()) }
         watchStore.schedule()
         refreshFiles()

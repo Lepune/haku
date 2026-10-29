@@ -1,13 +1,14 @@
 # Haku
 
-On-device search assistant for Android. Gemma 4 runs locally on the phone (LiteRT-LM, GPU),
-decides by itself when to search, reads pages and answers with sources. No account, no cloud LLM.
+On-device assisted search for Android: fast results first, with a small model that reads them
+and answers with numbered sources. Gemma 4 E2B runs locally on the phone (LiteRT-LM, GPU).
+No account, no cloud LLM.
 
 ## Install
 
 1. Install [Obtainium](https://github.com/ImranR98/Obtainium), add `https://github.com/Lepune/haku`.
 2. Open Haku → ⚙ → **Allow file access** (optional, keeps the model across reinstalls) → download
-   **Gemma 4 E4B** (~3.7 GB, once). It loads automatically when done.
+   **Gemma 4 E2B** (~2.6 GB, once). It loads automatically when done.
 
 Every push to `main` builds a signed APK and publishes it as a GitHub release, so Obtainium picks up updates.
 
@@ -16,9 +17,10 @@ Every push to `main` builds a signed APK and publishes it as a GitHub release, s
 | Part | Choice |
 |---|---|
 | Runtime | [LiteRT-LM](https://github.com/google-ai-edge/LiteRT-LM) Kotlin API, automatic tool calling |
-| Models | Gemma 4 E4B (default), Gemma 4 E2B (fast), Gemma 3 1B Tensor G4 NPU build (NPU test only) |
+| Models | Gemma 4 E2B (default), Gemma 3 1B Tensor G4 NPU build (NPU test only). E4B was dropped: too slow for quick lookups |
 | Accelerator | GPU (OpenCL) → CPU fallback. NPU selectable; only the G4 NPU test model targets it |
 | Modes | **Haku** (default): no AI writing — price questions give a list sorted by price from Finnish shops/price-comparison sites (schema.org offers, Y-tunnus → FI badge), other questions give web results + Wikipedia card. **Kysy**: Gemma answers with tools. **Tutki**: multi-page research with sources |
+| Kysy | The app searches Wikipedia + web first and hands Gemma a numbered evidence pack (best article passages, ranked by EmbeddingGemma); Gemma answers citing [n] and can still call tools if the evidence is thin |
 | Tools | `webSearch` (DuckDuckGo, or your SearXNG), `wikiSearch` (fi/en Wikipedia API), `readPage` |
 | Deep search | App-driven research: Gemma writes queries → app searches, reads up to 8 pages in parallel, extracts products/prices (schema.org JSON-LD) and relevant passages → Gemma answers from that evidence with numbered sources |
 | Ranking | EmbeddingGemma 2 270M (CPU, optional download) embeds every page passage while pages are still loading; the best passages across all pages go to Gemma. Falls back to keyword scoring |

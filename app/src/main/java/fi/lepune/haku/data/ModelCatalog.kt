@@ -21,22 +21,13 @@ data class ModelSpec(
 }
 
 object ModelCatalog {
-    val GEMMA4_E4B = ModelSpec(
-        id = "gemma4-e4b",
-        name = "Gemma 4 E4B",
-        repo = "litert-community/gemma-4-E4B-it-litert-lm",
-        fileName = "gemma-4-E4B-it.litertlm",
-        approxSizeMb = 3660,
-        description = "Best quality that runs well on the phone. Recommended. GPU.",
-    )
-
     val GEMMA4_E2B = ModelSpec(
         id = "gemma4-e2b",
         name = "Gemma 4 E2B",
         repo = "litert-community/gemma-4-E2B-it-litert-lm",
         fileName = "gemma-4-E2B-it.litertlm",
         approxSizeMb = 2600,
-        description = "About 3x faster, noticeably dumber. Good for quick lookups.",
+        description = "Fast lookups: reads the search results and answers in seconds. GPU.",
     )
 
     val GEMMA3_1B_G4_NPU = ModelSpec(
@@ -65,9 +56,25 @@ object ModelCatalog {
         kind = ModelKind.EMBEDDING,
     )
 
-    val CHAT = listOf(GEMMA4_E4B, GEMMA4_E2B, GEMMA3_1B_G4_NPU)
+    val CHAT = listOf(GEMMA4_E2B, GEMMA3_1B_G4_NPU)
     val ALL = CHAT + EMBEDDER
-    val DEFAULT = GEMMA4_E4B
+    val DEFAULT = GEMMA4_E2B
+
+    /**
+     * Models no longer offered. Their files are deleted on start so they don't sit on the
+     * phone unseen: Gemma 4 E4B (3.7 GB) was too slow for quick lookups; Haku is assisted
+     * search, a bigger model belongs on a proper machine.
+     */
+    val RETIRED = listOf(
+        ModelSpec(
+            id = "gemma4-e4b",
+            name = "Gemma 4 E4B",
+            repo = "litert-community/gemma-4-E4B-it-litert-lm",
+            fileName = "gemma-4-E4B-it.litertlm",
+            approxSizeMb = 3660,
+            description = "Retired.",
+        ),
+    )
 
     fun byId(id: String) = ALL.firstOrNull { it.id == id }
     fun chatById(id: String) = CHAT.firstOrNull { it.id == id }
