@@ -1,6 +1,11 @@
 package fi.lepune.haku.tools
 
 import android.os.SystemClock
+import fi.lepune.haku.search.Intent
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.withContext
 import com.google.ai.edge.litertlm.Tool
 import com.google.ai.edge.litertlm.ToolParam
 import com.google.ai.edge.litertlm.ToolSet
@@ -26,6 +31,8 @@ sealed interface ToolEvent {
  */
 class SearchTools(
     private val web: WebTools,
+    /** Embedding ranker for Wikipedia passages, when the embedding model is loaded. */
+    private val ranker: () -> Ranker? = { null },
     private val onEvent: (ToolEvent) -> Unit,
 ) : ToolSet {
 
@@ -67,7 +74,7 @@ class SearchTools(
         // Snippets alone make for one-line answers. Pull the relevant paragraphs of the top
         // article in the same call, so a single tool step already has real substance.
         val top = hits.first()
-        val passages = runCatching { web.wikiPassages(top.url, query) }.getOrNull()
+        val passages = runCatching { web.wikiPassages(top.url, query, ranker = ranker()) }.getOrNull()
         if (passages.isNullOrBlank()) list
         else "$list\n\nMost relevant passages from [${number(top)}] ${top.title}:\n$passages"
     }
@@ -83,6 +90,42 @@ class SearchTools(
         val hit = Hit(r.title, r.url, "")
         onEvent(ToolEvent.Read(hit))
         "<page n=\"${number(hit)}\" title=\"${r.title}\" url=\"${r.url}\">\n${r.text}\n</page>"
+    }
+
+    /**
+     * Kysy's first step, run by the app instead of the model: Wikipedia + web in parallel,
+     * numbered like tool results. Saves the model a whole round (reading the tool schemas and
+     * writing a tool call) before it sees any evidence. Returns null when no search is needed.
+     */
+    suspend fun prefetch(question: String): String? {
+        if (!needsSearch(question)) return null
+        val lang = if (Intent.isFinnish(question)) "fi" else "en"
+        val q = keywords(question)
+        onEvent(ToolEvent.Started("Searching Wikipedia + web: $q"))
+        val (wiki, webHits) = coroutineScope {
+            val w = async(Dispatchers.IO) { runCatching { web.wikiSearch(q, lang) }.getOrDefault(emptyList()) }
+            val h = async(Dispatchers.IO) { runCatching { web.webSearch(question) }.getOrDefault(emptyList()) }
+            w.await() to h.await()
+        }
+        // Passages need the top article's URL, so they come after the searches (one more call).
+        val top = wiki.firstOrNull()
+        val passages = top?.let { t ->
+            withContext(Dispatchers.IO) { runCatching { web.wikiPassages(t.url, q, ranker = ranker()) }.getOrNull() }
+        }
+        if (wiki.isNotEmpty()) onEvent(ToolEvent.Searched(wiki))
+        if (webHits.isNotEmpty()) onEvent(ToolEvent.Searched(webHits))
+        if (wiki.isEmpty() && webHits.isEmpty()) return null
+
+        fun short(h: Hit) = h.copy(snippet = h.snippet.take(PREFETCH_SNIPPET))
+        return buildString {
+            if (top != null && !passages.isNullOrBlank()) {
+                append("Wikipedia [${number(top)}] ${top.title}, most relevant passages:\n").append(passages).append("\n\n")
+            }
+            val wikiRest = wiki.drop(if (passages.isNullOrBlank()) 0 else 1).take(2).map(::short)
+            if (wikiRest.isNotEmpty()) append("Other Wikipedia articles:\n").append(format(wikiRest, "")).append("\n\n")
+            val webTop = webHits.take(4).map(::short)
+            if (webTop.isNotEmpty()) append("Web results:\n").append(format(webTop, "")).append('\n')
+        }.trim()
     }
 
     private inline fun guarded(label: String, block: () -> String): String {
@@ -128,6 +171,29 @@ class SearchTools(
 
     companion object {
         const val MAX_CALLS = 5
+        private const val PREFETCH_SNIPPET = 220
+
+        private val NO_SEARCH = Regex(
+            "^(hi|hey|hello|thanks?|thank you|moi|hei|terve|moro|kiitos|kiitti|ok|okei)\\b|" +
+                "^(write|rewrite|translate|summari[sz]e|fix|correct|kirjoita|käännä|korjaa|tiivistä|muotoile)\\b",
+            RegexOption.IGNORE_CASE,
+        )
+        private val MATH = Regex("^[\\d\\s.,+\\-*/^()=%x×÷]+$")
+
+        /** Greetings, writing tasks and plain arithmetic don't need a search. */
+        fun needsSearch(q: String): Boolean {
+            val t = q.trim()
+            return t.length >= 4 && !NO_SEARCH.containsMatchIn(t) && !MATH.matches(t)
+        }
+
+        /** "when did slavery get abolished in Africa" -> "slavery abolished Africa" for Wikipedia's search. */
+        fun keywords(q: String): String {
+            val words = q.replace(Regex("[?!.,;:\"()]"), " ").split(Regex("\\s+")).filter { it.isNotBlank() }
+            val kept = words.filter { w -> w.lowercase() !in WebTools.STOP && w.lowercase() !in EXTRA_STOP }
+            return kept.joinToString(" ").ifBlank { q.trim() }.take(100)
+        }
+
+        private val EXTRA_STOP = setOf("in", "of", "on", "at", "to", "a", "an", "do", "can", "will", "there", "ever", "first")
 
         /** Same page whatever the anchor, trailing slash or mobile subdomain. */
         fun key(url: String) = url.substringBefore('#').trimEnd('/')

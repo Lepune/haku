@@ -16,6 +16,9 @@ import java.util.concurrent.TimeUnit
 
 data class Hit(val title: String, val url: String, val snippet: String)
 
+/** Similarity of each text to the query (higher = more relevant), or null if unavailable. Blocking. */
+typealias Ranker = (query: String, texts: List<String>) -> FloatArray?
+
 /**
  * Network side of the search tools. No server needed: DuckDuckGo + Wikipedia online APIs.
  * If a SearXNG URL is set in settings, web search goes there instead.
@@ -220,7 +223,12 @@ class WebTools(private val settings: () -> Settings) {
      * The lead plus the paragraphs of a Wikipedia article that best match [query], in article
      * order, each under its section heading. Keyword stems, no model: costs one API call.
      */
-    fun wikiPassages(articleUrl: String, query: String, maxChars: Int = 1800): String? = offMain {
+    fun wikiPassages(
+        articleUrl: String,
+        query: String,
+        maxChars: Int = 1800,
+        ranker: Ranker? = null,
+    ): String? = offMain {
         val parsed = articleUrl.toHttpUrlOrNull() ?: return@offMain null
         if (!parsed.host.endsWith("wikipedia.org") || parsed.pathSegments.firstOrNull() != "wiki") return@offMain null
         val lang = normalizeLang(parsed.host.substringBefore('.'))
@@ -238,7 +246,7 @@ class WebTools(private val settings: () -> Settings) {
             .optJSONObject("query")?.optJSONArray("pages")?.optJSONObject(0)
             ?.optString("extract").orEmpty().take(120_000)
         if (extract.isBlank()) return@offMain null
-        selectPassages(extract, query, maxChars)
+        selectPassages(extract, query, maxChars, ranker)
     }
 
     private fun readWikipedia(lang: String, title: String): ReadResult {
@@ -320,7 +328,7 @@ class WebTools(private val settings: () -> Settings) {
         lang.trim().lowercase().take(3).filter { it.isLetter() }.ifEmpty { "en" }
 
     companion object {
-        private val STOP = setOf(
+        internal val STOP = setOf(
             "the", "and", "for", "with", "what", "when", "where", "which", "who", "how", "why", "did", "does",
             "was", "were", "are", "is", "get", "got", "from", "that", "this", "about", "into", "have", "has",
             "mikä", "mitä", "milloin", "missä", "miten", "miksi", "kuka", "onko", "oli", "ovat", "sekä", "kanssa",
@@ -328,8 +336,13 @@ class WebTools(private val settings: () -> Settings) {
         private val YEAR = Regex("\\b(1[0-9]{3}|20[0-9]{2})\\b")
         private val HEADING = Regex("^=+\\s*(.+?)\\s*=+$")
 
-        /** Pure function so it can be unit tested without the network. */
-        fun selectPassages(extract: String, query: String, maxChars: Int): String? {
+        /**
+         * Pure function so it can be unit tested without the network.
+         * Keyword stems pick up to [RERANK] candidates; if a [ranker] is given (EmbeddingGemma),
+         * those candidates are re-ordered by meaning, which finds "Mauritania abolished it in
+         * 1981" even when a paragraph about modern slavery shares more words with the query.
+         */
+        fun selectPassages(extract: String, query: String, maxChars: Int, ranker: Ranker? = null): String? {
             val stems = query.lowercase().split(Regex("[^\\p{L}\\p{N}]+"))
                 .filter { it.length >= 3 && it !in STOP }
                 .map { it.take(5) }
@@ -357,7 +370,15 @@ class WebTools(private val settings: () -> Settings) {
             val lead = paras.first()
             val chosen = mutableListOf(lead.copy(text = lead.text.take(450)))
             var budget = maxChars - chosen.first().text.length
-            for (p in paras.drop(1).filter { it.score >= 2.0 }.sortedByDescending { it.score }) {
+            val byKeyword = paras.drop(1).filter { it.score >= 2.0 }.sortedByDescending { it.score }
+            val candidates = byKeyword.take(RERANK)
+            val sims = ranker?.let { r -> runCatching { r(query, candidates.map { it.text.take(600) }) }.getOrNull() }
+            val ordered = if (sims != null && sims.size == candidates.size) {
+                candidates.indices.sortedByDescending { i ->
+                    sims[i] + 0.02f * YEAR.findAll(candidates[i].text).count().coerceAtMost(3)
+                }.map { candidates[it] }
+            } else byKeyword
+            for (p in ordered) {
                 val text = if (p.text.length > 700) p.text.take(700) + "…" else p.text
                 if (text.length > budget) continue
                 chosen += p.copy(text = text)
@@ -369,6 +390,8 @@ class WebTools(private val settings: () -> Settings) {
             }
         }
 
+        /** How many keyword candidates get embedded; ~1 s on the CPU for 270M. */
+        const val RERANK = 16
         const val MAX_HITS = 5
         const val SNIPPET = 300
         const val MAX_PAGE_CHARS = 6000

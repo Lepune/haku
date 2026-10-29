@@ -108,8 +108,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     /** Wall time spent inside tool calls for the active answer (network, parsing). */
     private val toolMs = java.util.concurrent.atomic.AtomicLong(0)
 
-    private val tools = SearchTools(web) { ev -> onToolEvent(ev) }
     private val embedder = Embedder(app)
+    private val tools = SearchTools(web, ranker = { passageRanker() }) { ev -> onToolEvent(ev) }
     private val renderer = PageRenderer(app)
     private val shop = ShopSearch(web) { url -> renderer.render(url) }
     private val quickWeb = QuickWeb(web)
@@ -168,6 +168,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 val loaded = llm.load(spec, models.file(spec), s.backend, s.speculativeDecoding)
                 llm.newConversation(systemPrompt(spec), if (spec.supportsTools) tools else null)
                 _state.update { it.copy(engine = EngineState.Ready(loaded), messages = emptyList()) }
+                // Warm the embedding model now so the first question doesn't pay for loading it.
+                if (spec.supportsTools) launch(Dispatchers.IO) { ensureEmbedder() }
             } catch (e: LoadException) {
                 _state.update { it.copy(engine = EngineState.Error(spec, e.message ?: "Load failed")) }
             } catch (t: Throwable) {
@@ -235,6 +237,25 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         val needsReload = reload || old.backend != new.backend ||
             old.speculativeDecoding != new.speculativeDecoding || old.modelId != new.modelId
         if (needsReload) loadSelectedIfPresent()
+    }
+
+    /** Loads EmbeddingGemma if its file is present; false if it isn't available. */
+    private suspend fun ensureEmbedder(): Boolean {
+        val spec = ModelCatalog.EMBEDDER
+        if (models.state(spec) !is ModelFileState.Ready) return false
+        return embedder.ensure(models.file(spec))
+    }
+
+    /** Cosine similarity of passages to the query, only when the embedder is already loaded. */
+    private fun passageRanker(): fi.lepune.haku.tools.Ranker? {
+        if (!embedder.isReady) return null
+        return { query, texts ->
+            if (texts.isEmpty()) FloatArray(0) else {
+                val q = embedder.embedQuery(query)
+                val vecs = embedder.embedDocs(texts)
+                FloatArray(vecs.size) { i -> Embedder.cosine(q, vecs[i]) }
+            }
+        }
     }
 
     private fun systemPrompt(spec: ModelSpec) =
@@ -374,15 +395,27 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             sendDeep(q)
             return
         }
-        val withCtx = if (context == null) q else
-            "$context\nAnswer from these results. Do not search again unless they clearly lack the answer.\n\nQuestion: $q"
-        val toModel = if (Intent.isFinnish(q)) "$withCtx\n\n(Vastaa suomeksi.)" else withCtx
+        val canSearch = ready.model.spec.supportsTools
 
         genJob = viewModelScope.launch(Dispatchers.IO) {
             val start = SystemClock.elapsedRealtime()
             var firstTokenAt = 0L
             var chars = 0
+            var searchMs = 0L
             try {
+                // The app searches first (no model round needed to decide that), then the model
+                // only has to read the evidence. It can still call tools if the evidence lacks it.
+                val ctx = context ?: if (!canSearch) null else {
+                    val t = SystemClock.elapsedRealtime()
+                    tools.prefetch(q).also {
+                        searchMs = SystemClock.elapsedRealtime() - t
+                        editActive { m -> m.copy(status = "Reading results…") }
+                    }
+                }
+                val withCtx = if (ctx == null) q else
+                    "$ctx\n\nAnswer from these results, citing [n]. Call a tool only if they clearly lack the answer.\n\nQuestion: $q"
+                val toModel = if (Intent.isFinnish(q)) "$withCtx\n\n(Vastaa suomeksi.)" else withCtx
+                val modelStart = SystemClock.elapsedRealtime()
                 llm.send(toModel).collect { chunk ->
                     val piece = chunk.toString()
                     if (piece.isEmpty()) return@collect
@@ -391,7 +424,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     editActive { it.copy(text = it.text + piece, status = null) }
                 }
                 val end = SystemClock.elapsedRealtime()
-                editActive { it.copy(done = true, status = null, stats = stats(start, firstTokenAt, end, chars, toolMs.get())) }
+                editActive { it.copy(done = true, status = null,
+                    stats = askStats(start, modelStart, firstTokenAt, end, chars, searchMs, toolMs.get())) }
             } catch (e: CancellationException) {
                 editActive { it.copy(done = true, status = null, stats = "stopped") }
                 throw e
@@ -510,6 +544,24 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun shortHost(url: String): String =
         runCatching { Uri.parse(url).host?.removePrefix("www.") }.getOrNull() ?: url.take(30)
+
+    /**
+     * Kysy timing: search (app) · model reading · extra tool calls the model made itself.
+     * "model" is prompt processing plus any tool-call writing, i.e. everything on the GPU
+     * before the first visible word.
+     */
+    private fun askStats(start: Long, modelStart: Long, first: Long, end: Long, chars: Int,
+                         searchMs: Long, extraToolMs: Long): String? {
+        if (first == 0L) return null
+        val tps = chars / 4.0 / (((end - first).coerceAtLeast(1)) / 1000.0)
+        fun s(ms: Long) = "%.1f".format(ms.coerceAtLeast(0) / 1000.0)
+        val parts = buildList {
+            if (searchMs > 0) add("search ${s(searchMs)} s")
+            add("model ${s(first - modelStart - extraToolMs)} s")
+            if (extraToolMs > 0) add("extra tools ${s(extraToolMs)} s")
+        }
+        return "${s(first - start)} s to first token (${parts.joinToString(" · ")}) · ~%.0f tok/s".format(tps)
+    }
 
     /**
      * ~4 chars per token is close enough for Gemma's tokenizer on mixed fi/en text.
