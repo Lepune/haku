@@ -100,7 +100,7 @@ class ShopSearch(private val web: WebTools) {
         val sorted = offers
             .filter { it.price in 1.0..1_000_000.0 }
             .sortedByDescending { it.finnish } // keep the FI-badged copy when deduplicating
-            .distinctBy { brand(it.shop) + "|" + "%.2f".format(it.price) + "|" + brand(it.name).take(30) }
+            .distinctBy { brand(it.shop) + "|" + "%.2f".format(it.price) }
             .sortedBy { it.price }
             .take(MAX_ROWS)
 
