@@ -203,7 +203,8 @@ class WebTools(private val settings: () -> Settings) {
     }
 
     private val deepClient by lazy {
-        client.newBuilder().callTimeout(15, TimeUnit.SECONDS).readTimeout(10, TimeUnit.SECONDS).build()
+        client.newBuilder().connectTimeout(3, TimeUnit.SECONDS).readTimeout(4, TimeUnit.SECONDS)
+            .callTimeout(6, TimeUnit.SECONDS).build()
     }
 
     // ---------------------------------------------------------------- http

@@ -273,7 +273,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             var firstTokenAt = 0L
             var chars = 0
             try {
-                val sources = deep.run(q) { ev ->
+                val result = deep.run(q) { ev ->
                     when (ev) {
                         is DeepSearch.Event.Step -> editActive { it.copy(status = ev.label, steps = it.steps + ev.label) }
                         is DeepSearch.Event.Searched -> editActive { it.copy(searched = (it.searched + ev.hits).distinctBy { h -> h.url }) }
@@ -286,13 +286,15 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     }
                 }
                 val end = SystemClock.elapsedRealtime()
-                val list = if (sources.isEmpty()) "" else "\n\n**Sources**\n" + sources.joinToString("\n") {
-                    "${it.n}. [${it.title.replace("[", "(").replace("]", ")").take(80)}](${it.url})"
+                // Compact sources: site name as the link text, full URL behind it.
+                val list = if (result.sources.isEmpty()) "" else "\n\n" + result.sources.joinToString("  ") {
+                    "[${it.n}] [${shortHost(it.url)}](${it.url})"
                 }
                 val total = "%.0f s total".format((end - start) / 1000.0)
                 editActive {
                     it.copy(text = it.text + list, done = true, status = null,
-                        stats = listOfNotNull(total, stats(start, firstTokenAt, end, chars)?.substringAfter(" · ")).joinToString(" · "))
+                        stats = listOfNotNull(total, result.timings,
+                            stats(start, firstTokenAt, end, chars)?.substringAfter(" · ")).joinToString(" · "))
                 }
             } catch (e: CancellationException) {
                 editActive { it.copy(done = true, status = null, stats = "stopped") }
@@ -327,6 +329,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         if (id < 0) return
         _state.update { s -> s.copy(messages = s.messages.map { if (it.id == id) f(it) else it }) }
     }
+
+    private fun shortHost(url: String): String =
+        runCatching { Uri.parse(url).host?.removePrefix("www.") }.getOrNull() ?: url.take(30)
 
     /** ~4 chars per token is close enough for Gemma's tokenizer on mixed fi/en text. */
     private fun stats(start: Long, first: Long, end: Long, chars: Int): String? {

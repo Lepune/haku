@@ -3,11 +3,11 @@ package fi.lepune.haku.llm
 import fi.lepune.haku.tools.Hit
 import fi.lepune.haku.tools.PageExtractor
 import fi.lepune.haku.tools.WebTools
+import android.os.SystemClock
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
@@ -48,23 +48,32 @@ class DeepSearch(
         val keywordText: String,
     )
 
-    suspend fun run(question: String, emit: (Event) -> Unit): List<Source> {
-        // 1. plan
-        emit(Event.Step("Planning searches"))
-        val plan = plan(question)
-        emit(Event.Step("Queries: " + plan.queries.joinToString(" · ")))
+    /** Result of a deep search: numbered sources plus a per-phase timing summary. */
+    data class Result(val sources: List<Source>, val timings: String)
 
-        // 2. search (sequential with a small gap; DuckDuckGo blocks bursts)
-        val perQuery = mutableListOf<List<Hit>>()
-        for (q in plan.queries) {
+    suspend fun run(question: String, emit: (Event) -> Unit): Result {
+        val t0 = SystemClock.elapsedRealtime()
+
+        // 1+2. Search the raw question immediately while Gemma plans extra queries in parallel.
+        val searchSem = Semaphore(2)
+        suspend fun search(q: String): List<Hit> = searchSem.withPermit {
             emit(Event.Step("Searching: $q"))
-            val hits = runCatching { withContext(Dispatchers.IO) { web.webSearch(q, limit = 8) } }
+            runCatching { withContext(Dispatchers.IO) { web.webSearch(q, limit = 8) } }
                 .onFailure { emit(Event.Step("⚠ search failed: ${it.message}")) }
                 .getOrDefault(emptyList())
-            if (hits.isNotEmpty()) emit(Event.Searched(hits))
-            perQuery += hits
-            delay(350)
+                .also { if (it.isNotEmpty()) emit(Event.Searched(it)) }
         }
+        val base = question.trim().take(120)
+        val (plan, firstHits) = coroutineScope {
+            val first = async { search(base) }
+            val p = async { plan(question) }
+            p.await() to first.await()
+        }
+        val extra = plan.queries.filterNot { it.equals(base, ignoreCase = true) }.take(MAX_EXTRA_QUERIES)
+        if (extra.isNotEmpty()) emit(Event.Step("More queries: " + extra.joinToString(" · ")))
+        val more = coroutineScope { extra.map { q -> async { search(q) } }.awaitAll() }
+        val perQuery = listOf(firstHits) + more
+        val tSearch = SystemClock.elapsedRealtime()
 
         // 3. choose pages: round-robin across queries, dedupe, max 2 per site
         val pages = pickPages(perQuery, MAX_PAGES)
@@ -75,12 +84,12 @@ class DeepSearch(
         val emb = embedder()
         val qVec = emb?.let { e -> runCatching { withContext(Dispatchers.IO) { e.embedQuery(question) } }.getOrNull() }
         if (qVec == null) emit(Event.Step("Keyword ranking" + (emb?.lastError?.let { " (embedder: $it)" } ?: " (no embedding model)")))
-        val sem = Semaphore(4)
+        val sem = Semaphore(MAX_PAGES)
         val pagesRead = coroutineScope {
             pages.map { hit ->
                 async(Dispatchers.IO) {
                     sem.withPermit {
-                        withTimeoutOrNull(20_000) {
+                        withTimeoutOrNull(PAGE_TIMEOUT_MS) {
                             runCatching {
                                 val doc = web.fetchDoc(hit.url)
                                 val products = PageExtractor.products(doc)
@@ -135,6 +144,8 @@ class DeepSearch(
             pagesRead.map { Triple(it.hit, it.products, it.keywordText) }
         }
 
+        val tRead = SystemClock.elapsedRealtime()
+
         // Keep search snippets for pages that failed to load — still better than nothing.
         val readUrls = pagesRead.map { it.hit.url }.toSet()
         val snippetOnly = pages.filter { it.url !in readUrls && it.snippet.isNotBlank() }
@@ -152,7 +163,7 @@ class DeepSearch(
             if (text.isNotBlank()) pack.append("Text: ").append(text).append('\n')
             pack.append('\n')
         }
-        for (hit in snippetOnly.take(4)) {
+        for (hit in snippetOnly.take(3)) {
             val n = sources.size + 1
             sources += Source(n, hit.title, hit.url)
             pack.append("[$n] ").append(hit.title.take(100)).append(" (").append(host(hit.url))
@@ -172,7 +183,10 @@ class DeepSearch(
                 if (t.isNotEmpty()) emit(Event.Token(t))
             }
         }
-        return sources
+        val tEnd = SystemClock.elapsedRealtime()
+        fun sec(ms: Long) = "%.1f".format(ms / 1000.0)
+        val timings = "search ${sec(tSearch - t0)} s · read ${sec(tRead - tSearch)} s · answer ${sec(tEnd - tRead)} s"
+        return Result(sources, timings)
     }
 
     // ------------------------------------------------------------------ planning
@@ -193,12 +207,12 @@ class DeepSearch(
             .map { it.trimStart('-', '*', '•', ' ').replace(Regex("^\\d+[.)]\\s*"), "").trim('"', '\'', ' ') }
             .filter { it.length in 3..120 }
             .distinct()
-            .take(5)
+            .take(3)
             .toMutableList()
         if (queries.isEmpty()) queries += question.take(120)
         if (product) {
             // Price comparison sites embed structured offer data; worth one extra query.
-            queries += "site:hinta.fi ${queries.first()}"
+            queries.add(0, "site:hinta.fi ${queries.first()}")
         }
         return Plan(queries.distinct(), product)
     }
@@ -207,7 +221,7 @@ class DeepSearch(
 Today is ${today()}.
 User question: $question
 
-Write 3 to 5 different web search queries that together find what is needed to answer it.
+Write 2 or 3 different web search queries that together find what is needed to answer it.
 - Short keyword queries, like a person types into a search engine.
 - Finnish queries for things about Finland or Finnish shops; English for international info. Mix both when useful.
 - Cover different angles (e.g. a shop, a comparison, the manufacturer's own site).
@@ -219,7 +233,7 @@ Output only the lines, nothing else.
 You answer the user's question using only the evidence below, collected from web pages. Today is ${today()}.
 Rules:
 - Reply in the language of the question.
-- Start with the direct answer, then a short comparison or the key details. Be compact. Use a table only if comparing several items.
+- Start with the direct answer, then only the key details. Keep it short: about 120 words unless the question needs more. Use a short table only when comparing several items.
 - After each fact, cite its source number like [2].
 - Quote prices exactly as given in the evidence with their source. Never invent a price, shop, product or URL. Simple arithmetic on given numbers is fine.
 - If the evidence does not cover part of the question (for example shipping costs or import VAT), say so plainly instead of guessing.
@@ -254,10 +268,13 @@ Rules:
     private fun today() = LocalDate.now().format(DateTimeFormatter.ofPattern("d MMMM yyyy", Locale.ENGLISH))
 
     companion object {
-        private const val MAX_PAGES = 8
+        private const val MAX_PAGES = 6
+        private const val MAX_EXTRA_QUERIES = 3
+        /** Don't wait for slow sites; whatever has arrived by then is used. */
+        private const val PAGE_TIMEOUT_MS = 8_000L
         private const val MAX_EVIDENCE_CHARS = 16_000
-        private const val TEXT_BUDGET = 9_000
-        private const val MAX_CHUNKS_PER_PAGE = 4
+        private const val TEXT_BUDGET = 5_000
+        private const val MAX_CHUNKS_PER_PAGE = 3
         private const val MIN_SCORE = 0.15f
         private const val PRICE_BONUS = 0.03f
         private const val PLANNER_SYSTEM = "You write web search queries. Output only the queries, one per line."
