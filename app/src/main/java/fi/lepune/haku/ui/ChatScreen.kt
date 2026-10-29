@@ -62,6 +62,9 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
@@ -76,13 +79,15 @@ import fi.lepune.haku.tools.Hit
 @Composable
 fun ChatScreen(
     state: UiState,
-    initialText: String?,
+    prefill: String?,
+    focusTick: Int,
+    onPrefillConsumed: () -> Unit,
     onSend: (String) -> Unit,
     onStop: () -> Unit,
     onNewChat: () -> Unit,
     onOpenSetup: () -> Unit,
     onModeChange: (Mode) -> Unit,
-    onAskGemma: (String) -> Unit,
+    onAskGemma: (Long) -> Unit,
     onOpenConversation: (Long) -> Unit,
     onDeleteConversation: (Long) -> Unit,
     onWatch: (Long) -> Unit,
@@ -97,7 +102,19 @@ fun ChatScreen(
         onWatch(id)
     }
     val watched = state.watches.map { it.query.lowercase() }.toSet()
-    var input by rememberSaveable { mutableStateOf(initialText.orEmpty()) }
+    var input by rememberSaveable { mutableStateOf("") }
+    val focus = remember { FocusRequester() }
+    val keyboard = LocalSoftwareKeyboardController.current
+    LaunchedEffect(prefill) {
+        if (prefill != null) { input = prefill; onPrefillConsumed() }
+    }
+    LaunchedEffect(focusTick) {
+        if (focusTick > 0) {
+            kotlinx.coroutines.delay(200) // let the home screen compose first
+            runCatching { focus.requestFocus() }
+            keyboard?.show()
+        }
+    }
     val listState = rememberLazyListState()
 
     LaunchedEffect(state.messages.size, state.messages.lastOrNull()?.text?.length) {
@@ -168,6 +185,7 @@ fun ChatScreen(
                 generating = state.generating,
                 mode = state.settings.mode,
                 onModeChange = onModeChange,
+                focus = focus,
                 onSend = { onSend(input); input = "" },
                 onStop = onStop,
             )
@@ -312,7 +330,7 @@ private fun AssistantBlock(
     msg: ChatMessage,
     canAsk: Boolean,
     watched: Boolean,
-    onAskGemma: (String) -> Unit,
+    onAskGemma: (Long) -> Unit,
     onWatch: (Long) -> Unit,
     onDiscussions: (Long) -> Unit,
 ) {
@@ -336,8 +354,9 @@ private fun AssistantBlock(
         }
 
         msg.offers?.let { OffersCard(it) }
+        msg.site?.let { SiteCard(it) }
         msg.instant?.let { InstantCard(it) }
-        msg.results?.let { ResultsList(it) }
+        msg.results?.let { r -> ResultsList(if (msg.site != null) r.filterNot { it.url == msg.site.url } else r) }
 
         if (msg.text.isNotEmpty()) {
             SelectionContainer { Markdown(content = msg.text, modifier = Modifier.fillMaxWidth()) }
@@ -386,7 +405,7 @@ private fun AssistantBlock(
                         )
                     }
                     if (canAsk) {
-                        AssistChip(onClick = { onAskGemma(msg.question) }, label = { Text("Kysy Gemmalta") })
+                        AssistChip(onClick = { onAskGemma(msg.id) }, label = { Text("Kysy Gemmalta") })
                     }
                 }
             }
@@ -431,6 +450,7 @@ private fun InputBar(
     generating: Boolean,
     mode: Mode,
     onModeChange: (Mode) -> Unit,
+    focus: FocusRequester,
     onSend: () -> Unit,
     onStop: () -> Unit,
 ) {
@@ -465,7 +485,7 @@ private fun InputBar(
                 shape = RoundedCornerShape(24.dp),
                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
                 keyboardActions = KeyboardActions(onSend = { if (!generating && value.isNotBlank()) onSend() }),
-                modifier = Modifier.weight(1f),
+                modifier = Modifier.weight(1f).focusRequester(focus),
             )
             Spacer(Modifier.size(8.dp))
             if (generating) {
@@ -608,3 +628,27 @@ private fun ResultsList(results: List<Hit>) {
 }
 
 private fun euro(v: Double) = String.format(java.util.Locale.ROOT, "%.2f €", v).replace('.', ',')
+
+/** Big "go to site" card for navigational queries. */
+@Composable
+private fun SiteCard(h: Hit) {
+    val ctx = LocalContext.current
+    Surface(
+        shape = RoundedCornerShape(16.dp),
+        color = MaterialTheme.colorScheme.primaryContainer,
+        modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp).clickable {
+            runCatching { ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(h.url))) }
+        },
+    ) {
+        Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text(Uri.parse(h.url).host?.removePrefix("www.") ?: h.url,
+                    style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onPrimaryContainer)
+                Text(h.title, style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                    color = MaterialTheme.colorScheme.onPrimaryContainer)
+            }
+            Text("Avaa →", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onPrimaryContainer)
+        }
+    }
+}

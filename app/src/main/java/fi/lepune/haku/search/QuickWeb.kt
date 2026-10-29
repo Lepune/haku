@@ -27,7 +27,25 @@ class QuickWeb(private val web: WebTools) {
         val r = results.await()
         val i = instant.await()
         val ms = SystemClock.elapsedRealtime() - t0
-        WebResult(r, i, "${r.size} results · %.1f s".format(ms / 1000.0))
+        WebResult(r, i, "${r.size} results · %.1f s".format(ms / 1000.0), site = navigationalTarget(question, r))
+    }
+
+    /**
+     * Short queries that name a site ("runescape", "yle areena", "posti seuranta") are navigation, not
+     * questions: pick the first top-3 result whose domain spells the query.
+     */
+    private fun navigationalTarget(q: String, results: List<Hit>): Hit? {
+        val words = q.trim().split(Regex("\\s+"))
+        if (words.size > 4 || q.contains('?') || Intent.isShopping(q)) return null
+        val compact = q.lowercase().filter { it.isLetterOrDigit() }
+        if (compact.length < 3) return null
+        return results.take(3).firstOrNull { h ->
+            val host = runCatching { java.net.URI(h.url).host }.getOrNull()?.lowercase()?.removePrefix("www.") ?: return@firstOrNull false
+            val label = host.substringBeforeLast('.').filter { it.isLetterOrDigit() } // "oldschool.runescape" -> "oldschoolrunescape"
+            val main = host.substringBeforeLast('.').substringAfterLast('.')            // "runescape"
+            label.contains(compact) || compact.contains(main) && main.length >= 3 ||
+                words.any { w -> w.length >= 4 && main == w.lowercase().filter { it.isLetterOrDigit() } }
+        }
     }
 
     /** What people say: forum and community threads (Reddit, io-tech, Suomi24, Vauva.fi). */

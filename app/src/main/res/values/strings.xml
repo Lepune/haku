@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="widget_description">Search bar that opens Haku ready to type</string>
+    <string name="process_text_label">Hae Haulla</string>
+</resources>

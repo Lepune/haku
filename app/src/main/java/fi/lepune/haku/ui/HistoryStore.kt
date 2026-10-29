@@ -74,6 +74,7 @@ class HistoryStore(context: Context) {
         m.results?.let { put("results", hits(it)) }
         m.instant?.let { put("instant", hit(it)) }
         m.discussions?.let { put("disc", hits(it)) }
+        m.site?.let { put("site", hit(it)) }
         m.offers?.let { put("offers", JSONArray().apply { it.forEach { o -> put(offer(o)) } }) }
     }
 
@@ -91,6 +92,7 @@ class HistoryStore(context: Context) {
         results = o.optJSONArray("results")?.let(::hitsOf),
         instant = o.optJSONObject("instant")?.let(::hitOf),
         discussions = o.optJSONArray("disc")?.let(::hitsOf),
+        site = o.optJSONObject("site")?.let(::hitOf),
         offers = o.optJSONArray("offers")?.let { a -> (0 until a.length()).map { offerOf(a.getJSONObject(it)) } },
         done = true,
     )

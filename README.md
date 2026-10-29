@@ -28,6 +28,13 @@ Every push to `main` builds a signed APK and publishes it as a GitHub release, s
 The engine status line in the top bar shows which backend actually loaded, so you can see whether
 the NPU or GPU is in use.
 
+## Use as your search bar / assistant
+
+- **Widget:** long-press the home screen → Widgets → Haku. Tapping it opens Haku with the keyboard up.
+- **Assistant gesture:** Settings → Apps → Default apps → Digital assistant app → Haku. Long-press home /
+  corner swipe then opens Haku ready to search.
+- **Select text anywhere → "Hae Haulla"** runs a search on the selection; apps that "search the web" can hand off to Haku.
+
 ## Own server later
 
 Set **SearXNG URL** in settings (e.g. a SearXNG instance on your own network). Web search then

@@ -60,6 +60,7 @@ data class ChatMessage(
     val results: List<Hit>? = null,
     val instant: Hit? = null,
     val discussions: List<Hit>? = null,
+    val site: Hit? = null,
     val loadingDiscussions: Boolean = false,
 )
 
@@ -318,7 +319,34 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         _state.update { it.copy(recent = history.list()) }
     }
 
-    fun send(text: String, modeOverride: Mode? = null) {
+    /** "Kysy Gemmalta": answer from the results already on screen instead of searching again. */
+    fun askAbout(msgId: Long) {
+        val msg = _state.value.messages.firstOrNull { it.id == msgId } ?: return
+        val q = msg.question ?: return
+        fun eur(v: Double) = String.format(java.util.Locale.ROOT, "%.2f €", v).replace('.', ',')
+        val ctx = buildString {
+            msg.offers?.takeIf { it.isNotEmpty() }?.let { offers ->
+                append("Price list already found (cheapest first):\n")
+                offers.forEachIndexed { i, o ->
+                    append("${i + 1}. ${eur(o.price)}")
+                    if (o.from) append(" (from)")
+                    o.shipping?.let { append(" + delivery ${eur(it)}") }
+                    append(" — ${o.name} — ${o.shop}")
+                    when (o.inStock) { true -> append(", in stock"); false -> append(", out of stock"); null -> {} }
+                    if (o.finnish) append(", Finnish company")
+                    append('\n')
+                }
+            }
+            msg.instant?.let { append("Wikipedia: ${it.title}: ${it.snippet}\n") }
+            msg.results?.takeIf { it.isNotEmpty() }?.let { r ->
+                append("Web results already found:\n")
+                r.take(8).forEachIndexed { i, h -> append("${i + 1}. ${h.title} (${h.url}) — ${h.snippet}\n") }
+            }
+        }
+        send(q, Mode.ASK, context = ctx.ifBlank { null })
+    }
+
+    fun send(text: String, modeOverride: Mode? = null, context: String? = null) {
         val q = text.trim()
         if (q.isEmpty() || _state.value.generating) return
         val mode = modeOverride ?: _state.value.settings.mode
@@ -341,7 +369,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             sendDeep(q)
             return
         }
-        val toModel = if (Intent.isFinnish(q)) "$q\n\n(Vastaa suomeksi.)" else q
+        val withCtx = if (context == null) q else
+            "$context\nAnswer from these results. Do not search again unless they clearly lack the answer.\n\nQuestion: $q"
+        val toModel = if (Intent.isFinnish(q)) "$withCtx\n\n(Vastaa suomeksi.)" else withCtx
 
         genJob = viewModelScope.launch(Dispatchers.IO) {
             val start = SystemClock.elapsedRealtime()
@@ -390,7 +420,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     editActive { it.copy(offers = r.offers, stats = r.summary, done = true, status = null) }
                 } else {
                     val r = quickWeb.run(q)
-                    editActive { it.copy(results = r.results, instant = r.instant, stats = r.summary, done = true, status = null) }
+                    editActive { it.copy(results = r.results, instant = r.instant, site = r.site, stats = r.summary, done = true, status = null) }
                 }
             } catch (e: CancellationException) {
                 editActive { it.copy(done = true, status = null, stats = "stopped") }

@@ -25,4 +25,10 @@ data class Offer(
 
 data class ShopResult(val offers: List<Offer>, val summary: String)
 
-data class WebResult(val results: List<Hit>, val instant: Hit?, val summary: String)
+data class WebResult(
+    val results: List<Hit>,
+    val instant: Hit?,
+    val summary: String,
+    /** The site the user most likely wants to open ("runescape" -> runescape.com). */
+    val site: Hit? = null,
+)
