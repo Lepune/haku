@@ -71,6 +71,7 @@ class HistoryStore(context: Context) {
         if (m.steps.isNotEmpty()) put("steps", JSONArray(m.steps))
         if (m.read.isNotEmpty()) put("read", hits(m.read))
         if (m.searched.isNotEmpty()) put("searched", hits(m.searched.take(5)))
+        if (m.sources.isNotEmpty()) put("sources", hits(m.sources.map { it.copy(snippet = "") }))
         m.results?.let { put("results", hits(it)) }
         m.instant?.let { put("instant", hit(it)) }
         m.discussions?.let { put("disc", hits(it)) }
@@ -89,6 +90,7 @@ class HistoryStore(context: Context) {
         steps = o.optJSONArray("steps")?.let { a -> (0 until a.length()).map { a.getString(it) } } ?: emptyList(),
         read = o.optJSONArray("read")?.let(::hitsOf) ?: emptyList(),
         searched = o.optJSONArray("searched")?.let(::hitsOf) ?: emptyList(),
+        sources = o.optJSONArray("sources")?.let(::hitsOf) ?: emptyList(),
         results = o.optJSONArray("results")?.let(::hitsOf),
         instant = o.optJSONObject("instant")?.let(::hitOf),
         discussions = o.optJSONArray("disc")?.let(::hitsOf),

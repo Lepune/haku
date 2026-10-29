@@ -50,6 +50,8 @@ data class ChatMessage(
     val steps: List<String> = emptyList(),
     val searched: List<Hit> = emptyList(),
     val read: List<Hit> = emptyList(),
+    /** Numbered sources for inline citations: index 0 is [1]. */
+    val sources: List<Hit> = emptyList(),
     val stats: String? = null,
     val error: String? = null,
     val done: Boolean = true,
@@ -103,6 +105,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Assistant message currently receiving tool events. */
     @Volatile private var activeId = -1L
+    /** Wall time spent inside tool calls for the active answer (network, parsing). */
+    private val toolMs = java.util.concurrent.atomic.AtomicLong(0)
 
     private val tools = SearchTools(web) { ev -> onToolEvent(ev) }
     private val embedder = Embedder(app)
@@ -364,6 +368,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         activeId = reply.id
         _state.update { it.copy(messages = it.messages + user + reply, generating = true) }
         tools.resetBudget()
+        toolMs.set(0)
 
         if (useDeep) {
             sendDeep(q)
@@ -386,7 +391,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     editActive { it.copy(text = it.text + piece, status = null) }
                 }
                 val end = SystemClock.elapsedRealtime()
-                editActive { it.copy(done = true, status = null, stats = stats(start, firstTokenAt, end, chars)) }
+                editActive { it.copy(done = true, status = null, stats = stats(start, firstTokenAt, end, chars, toolMs.get())) }
             } catch (e: CancellationException) {
                 editActive { it.copy(done = true, status = null, stats = "stopped") }
                 throw e
@@ -489,8 +494,12 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             is ToolEvent.Searched -> editActive { it.copy(searched = (it.searched + ev.hits).distinctBy { h -> h.url }) }
             is ToolEvent.Read -> editActive { it.copy(read = (it.read + ev.hit).distinctBy { h -> h.url }) }
             is ToolEvent.Failed -> editActive { it.copy(steps = it.steps + "⚠ ${ev.label}: ${ev.error}") }
+            is ToolEvent.Finished -> {
+                toolMs.addAndGet(ev.ms)
+                editActive { it.copy(status = "Thinking…") }
+            }
+            is ToolEvent.Sources -> editActive { it.copy(sources = ev.all) }
         }
-        if (ev !is ToolEvent.Started) editActive { it.copy(status = "Thinking…") }
     }
 
     private inline fun editActive(crossinline f: (ChatMessage) -> ChatMessage) {
@@ -502,13 +511,19 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     private fun shortHost(url: String): String =
         runCatching { Uri.parse(url).host?.removePrefix("www.") }.getOrNull() ?: url.take(30)
 
-    /** ~4 chars per token is close enough for Gemma's tokenizer on mixed fi/en text. */
-    private fun stats(start: Long, first: Long, end: Long, chars: Int): String? {
+    /**
+     * ~4 chars per token is close enough for Gemma's tokenizer on mixed fi/en text.
+     * With [toolMs], time to first token is split into tools (search, fetching pages) and
+     * model (reading the results + deciding what to call), so it's clear which side is slow.
+     */
+    private fun stats(start: Long, first: Long, end: Long, chars: Int, toolMs: Long = 0): String? {
         if (first == 0L) return null
-        val ttft = (first - start) / 1000.0
+        val ttftMs = first - start
         val genSec = ((end - first).coerceAtLeast(1)) / 1000.0
         val tps = chars / 4.0 / genSec
-        return "%.1f s to first token · ~%.0f tok/s".format(ttft, tps)
+        val split = if (toolMs > 0) " (tools %.1f s · model %.1f s)".format(toolMs / 1000.0,
+            (ttftMs - toolMs).coerceAtLeast(0) / 1000.0) else ""
+        return "%.1f s to first token%s · ~%.0f tok/s".format(ttftMs / 1000.0, split, tps)
     }
 
     override fun onCleared() {

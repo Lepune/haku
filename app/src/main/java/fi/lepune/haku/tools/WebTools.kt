@@ -216,6 +216,31 @@ class WebTools(private val settings: () -> Settings) {
 
     data class ReadResult(val title: String, val url: String, val text: String)
 
+    /**
+     * The lead plus the paragraphs of a Wikipedia article that best match [query], in article
+     * order, each under its section heading. Keyword stems, no model: costs one API call.
+     */
+    fun wikiPassages(articleUrl: String, query: String, maxChars: Int = 1800): String? = offMain {
+        val parsed = articleUrl.toHttpUrlOrNull() ?: return@offMain null
+        if (!parsed.host.endsWith("wikipedia.org") || parsed.pathSegments.firstOrNull() != "wiki") return@offMain null
+        val lang = normalizeLang(parsed.host.substringBefore('.'))
+        val title = parsed.pathSegments.drop(1).joinToString("/").replace('_', ' ')
+        val url = "https://$lang.wikipedia.org/w/api.php".toHttpUrl().newBuilder()
+            .addQueryParameter("action", "query")
+            .addQueryParameter("prop", "extracts")
+            .addQueryParameter("explaintext", "1")
+            .addQueryParameter("redirects", "1")
+            .addQueryParameter("format", "json")
+            .addQueryParameter("formatversion", "2")
+            .addQueryParameter("titles", title)
+            .build()
+        val extract = JSONObject(get(url.toString(), APP_UA))
+            .optJSONObject("query")?.optJSONArray("pages")?.optJSONObject(0)
+            ?.optString("extract").orEmpty().take(120_000)
+        if (extract.isBlank()) return@offMain null
+        selectPassages(extract, query, maxChars)
+    }
+
     private fun readWikipedia(lang: String, title: String): ReadResult {
         val l = normalizeLang(lang)
         val url = "https://$l.wikipedia.org/w/api.php".toHttpUrl().newBuilder()
@@ -295,6 +320,55 @@ class WebTools(private val settings: () -> Settings) {
         lang.trim().lowercase().take(3).filter { it.isLetter() }.ifEmpty { "en" }
 
     companion object {
+        private val STOP = setOf(
+            "the", "and", "for", "with", "what", "when", "where", "which", "who", "how", "why", "did", "does",
+            "was", "were", "are", "is", "get", "got", "from", "that", "this", "about", "into", "have", "has",
+            "mikä", "mitä", "milloin", "missä", "miten", "miksi", "kuka", "onko", "oli", "ovat", "sekä", "kanssa",
+        )
+        private val YEAR = Regex("\\b(1[0-9]{3}|20[0-9]{2})\\b")
+        private val HEADING = Regex("^=+\\s*(.+?)\\s*=+$")
+
+        /** Pure function so it can be unit tested without the network. */
+        fun selectPassages(extract: String, query: String, maxChars: Int): String? {
+            val stems = query.lowercase().split(Regex("[^\\p{L}\\p{N}]+"))
+                .filter { it.length >= 3 && it !in STOP }
+                .map { it.take(5) }
+                .distinct()
+
+            data class Para(val index: Int, val section: String, val text: String, val score: Double)
+
+            var section = ""
+            val paras = mutableListOf<Para>()
+            for (line in extract.lines()) {
+                val t = line.trim()
+                if (t.isEmpty()) continue
+                val h = HEADING.matchEntire(t)
+                if (h != null) { section = h.groupValues[1]; continue }
+                if (t.length < 40) continue
+                val low = t.lowercase()
+                val hits = stems.count { low.contains(it) }
+                // Dates and numbers are what short answers usually lack.
+                val years = YEAR.findAll(t).count().coerceAtMost(4)
+                val score = hits * 2.0 + years * 0.5 + if (section.isEmpty()) 0.5 else 0.0
+                paras += Para(paras.size, section, t, score)
+            }
+            if (paras.isEmpty()) return null
+
+            val lead = paras.first()
+            val chosen = mutableListOf(lead.copy(text = lead.text.take(450)))
+            var budget = maxChars - chosen.first().text.length
+            for (p in paras.drop(1).filter { it.score >= 2.0 }.sortedByDescending { it.score }) {
+                val text = if (p.text.length > 700) p.text.take(700) + "…" else p.text
+                if (text.length > budget) continue
+                chosen += p.copy(text = text)
+                budget -= text.length
+                if (budget < 150) break
+            }
+            return chosen.sortedBy { it.index }.joinToString("\n") { p ->
+                if (p.section.isEmpty()) p.text else "(${p.section}) ${p.text}"
+            }
+        }
+
         const val MAX_HITS = 5
         const val SNIPPET = 300
         const val MAX_PAGE_CHARS = 6000

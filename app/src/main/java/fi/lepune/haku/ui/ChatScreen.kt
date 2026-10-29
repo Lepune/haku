@@ -74,6 +74,7 @@ import com.mikepenz.markdown.m3.Markdown
 import fi.lepune.haku.data.Mode
 import fi.lepune.haku.search.Offer
 import fi.lepune.haku.tools.Hit
+import fi.lepune.haku.tools.SearchTools
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -382,7 +383,7 @@ private fun AssistantBlock(
 
         if (msg.done) {
             if (msg.mode != Mode.SEARCH) {
-                val chips = msg.read.ifEmpty { msg.searched.take(3) }
+                val chips = sourceChips(msg)
                 if (chips.isNotEmpty()) SourceChips(chips)
             }
             msg.stats?.let {
@@ -422,22 +423,55 @@ private fun AssistantBlock(
     }
 }
 
+private val CITE = Regex("\\[(\\d{1,2}(?:\\s*,\\s*\\d{1,2})*)]")
+
+/**
+ * Which sources to show under an answer, with their citation number when there is one.
+ * Kysy answers carry numbered [sources]: show the ones the text actually cites, so a chip
+ * means "this sentence came from here". Older answers fall back to read / searched pages.
+ */
+private fun sourceChips(msg: ChatMessage): List<Pair<Int?, Hit>> {
+    if (msg.sources.isNotEmpty()) {
+        val cited = CITE.findAll(msg.text)
+            .flatMap { m -> m.groupValues[1].split(',').mapNotNull { it.trim().toIntOrNull() } }
+            .distinct()
+            .filter { it in 1..msg.sources.size }
+            .sorted()
+            .toList()
+        if (cited.isNotEmpty()) return cited.map { it to msg.sources[it - 1] }
+        val readKeys = msg.read.map { SearchTools.key(it.url) }.toSet()
+        val read = msg.sources.withIndex().filter { SearchTools.key(it.value.url) in readKeys }
+        val pick = read.ifEmpty { msg.sources.withIndex().take(3) }
+        return pick.map { (i, h) -> (i + 1) to h }
+    }
+    return msg.read.ifEmpty { msg.searched.take(3) }.map { null to it }
+}
+
+/** "Abolitionism - Wikipedia" -> "Abolitionism"; blank titles fall back to the site name. */
+private fun chipTitle(h: Hit): String {
+    val t = h.title.trim()
+        .replace(Regex("\\s+[-–—|]\\s+Wikipedia$"), "")
+        .replace(Regex("\\s+[-–—|]\\s+Wikipedia, the free encyclopedia$"), "")
+    return t.ifBlank { Uri.parse(h.url).host?.removePrefix("www.") ?: h.url }
+}
+
 @Composable
-private fun SourceChips(hits: List<Hit>) {
+private fun SourceChips(hits: List<Pair<Int?, Hit>>) {
     val ctx = LocalContext.current
     Row(
         Modifier.horizontalScroll(rememberScrollState()).padding(top = 6.dp),
         horizontalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-        hits.forEach { h ->
+        hits.forEach { (n, h) ->
             AssistChip(
                 onClick = {
                     runCatching { ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(h.url))) }
                 },
                 label = {
                     Text(
-                        Uri.parse(h.url).host?.removePrefix("www.") ?: h.title,
+                        (if (n != null) "$n · " else "") + chipTitle(h),
                         maxLines = 1, overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.widthIn(max = 220.dp),
                     )
                 },
             )
